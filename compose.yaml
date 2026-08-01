@@ -1,0 +1,40 @@
+services:
+  game-server:
+    build:
+      context: .
+      dockerfile: apps/game-server/Dockerfile
+    restart: unless-stopped
+    environment:
+      KAATAAN_SERVER_HOST: 0.0.0.0
+      KAATAAN_SERVER_PORT: 4180
+      KAATAAN_DATA_FILE: /data/rooms.json
+    volumes:
+      - kaataan-data:/data
+    expose:
+      - "4180"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:4180/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+      start_period: 5s
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      game-server:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+      start_period: 5s
+
+volumes:
+  kaataan-data:

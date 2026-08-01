@@ -1,0 +1,21 @@
+{
+  "name": "kaataan",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev": "pnpm --filter @kaataan/web dev",
+    "dev:server": "pnpm --filter @kaataan/game-server dev",
+    "start:server": "pnpm --filter @kaataan/game-server start",
+    "build": "pnpm --filter @kaataan/web build",
+    "test": "pnpm -r test",
+    "test:e2e": "playwright test",
+    "verify": "pnpm typecheck && pnpm test && pnpm test:e2e && pnpm build",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^26.1.2",
+    "typescript": "^7.0.2"
+  }
+}

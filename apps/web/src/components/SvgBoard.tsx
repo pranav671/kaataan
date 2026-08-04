@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent } from "react";
-import type { GameState, HexId, PlayerId, PortKind } from "@kaataan/game-engine";
+import { RESOURCE_TYPES, type GameState, type HexId, type PlayerId, type PortKind, type ResourceBundle } from "@kaataan/game-engine";
 
 import type { BoardTargetId, LegalTargets } from "../game/presentation.ts";
 import { playerColor, RESOURCE_META } from "../game/presentation.ts";
@@ -36,9 +36,18 @@ interface SvgBoardProps {
   readonly onTarget: (id: BoardTargetId) => void;
   readonly onInspect: (selection: BoardSelection) => void;
   readonly colorsByPlayer?: ReadonlyMap<PlayerId, string>;
+  readonly rollResult?: { readonly dice: readonly [number, number]; readonly total: number } | null;
+  readonly productionPayouts?: Readonly<Record<PlayerId, ResourceBundle>> | null;
 }
 
-export function SvgBoard({ state, targets, selectedId, onTarget, onInspect, colorsByPlayer }: SvgBoardProps) {
+const DIE_PIPS: Readonly<Record<number, readonly number[]>> = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
+
+function Die({ value }: { readonly value: number }) {
+  const pips = new Set(DIE_PIPS[value] ?? []);
+  return <span className="die" aria-label={`Die showing ${value}`}>{Array.from({ length: 9 }, (_, index) => <i key={index} className={pips.has(index) ? "is-pip" : ""} />)}</span>;
+}
+
+export function SvgBoard({ state, targets, selectedId, onTarget, onInspect, colorsByPlayer, rollResult, productionPayouts }: SvgBoardProps) {
   const topology = state.layout.topology;
   const bounds = useMemo(() => {
     const points = [...topology.vertices.values()].map((vertex) => xy(vertex.position));
@@ -120,7 +129,7 @@ export function SvgBoard({ state, targets, selectedId, onTarget, onInspect, colo
             const anchor = { x: midpoint.x + (midpoint.x - bounds.cx) / length * 58, y: midpoint.y + (midpoint.y - bounds.cy) / length * 58 };
             return <g key={port.id} className="port" aria-label={`${port.kind} port`}>
               <path d={`M${a.x} ${a.y} L${anchor.x} ${anchor.y} L${b.x} ${b.y}`} fill="none" stroke="#e6d19a" strokeWidth="4" strokeLinecap="round" strokeDasharray="4 7" />
-              <g transform={`translate(${anchor.x} ${anchor.y})`}><circle r="23" fill="#f6e9bd" stroke="#715c3e" strokeWidth="2" /><path d="M-11 6h22l-4 7H-7zM0-12V6M0-10l8 10H0" fill="none" stroke="#715c3e" strokeWidth="2" strokeLinejoin="round" /><text y="20" textAnchor="middle" fontSize="8" fontWeight="800" fill="#715c3e">{portLabel(port.kind)}</text>{port.kind !== "generic" && <circle cx="13" cy="-13" r="7" fill={RESOURCE_META[port.kind].color} stroke="#f6e9bd" strokeWidth="2" />}</g>
+              <g transform={`translate(${anchor.x} ${anchor.y})`}><circle r="27" fill="#f6e9bd" stroke="#715c3e" strokeWidth="2" /><path d="M-11 3h22l-4 7H-7zM0-14V3M0-12l8 10H0" fill="none" stroke="#715c3e" strokeWidth="2" strokeLinejoin="round" /><rect x="-15" y="11" width="30" height="13" rx="6.5" fill="#715c3e" /><text y="21" textAnchor="middle" fontSize="11" fontWeight="900" fill="#fff8df">{portLabel(port.kind)}</text>{port.kind !== "generic" && <circle cx="16" cy="-16" r="8" fill={RESOURCE_META[port.kind].color} stroke="#f6e9bd" strokeWidth="2" />}</g>
             </g>;
           })}
         </g>
@@ -142,7 +151,7 @@ export function SvgBoard({ state, targets, selectedId, onTarget, onInspect, colo
             return (
               <g
                 key={hexId}
-                className={`hex-tile terrain-${tile.terrain}${legal ? " is-legal" : ""}${selected ? " is-selected" : ""}`}
+                className={`hex-tile terrain-${tile.terrain}${legal ? " is-legal" : ""}${selected ? " is-selected" : ""}${rollResult && token?.value === rollResult.total ? " is-roll-match" : ""}`}
                 role="button"
                 tabIndex={0}
                 aria-label={`${style.label}${tile.token ? `, number ${tile.token.value}` : ""}${legal ? ", legal target" : ""}`}
@@ -175,7 +184,6 @@ export function SvgBoard({ state, targets, selectedId, onTarget, onInspect, colo
             return <g key={edgeId} className={`board-edge${legal ? " is-legal" : ""}`} role={road || legal ? "button" : undefined} tabIndex={legal ? 0 : undefined} aria-hidden={!road && !legal} aria-label={road ? `${state.players.get(road.playerId)?.name}'s road` : legal ? "Build road here" : undefined} onClick={(event) => { event.stopPropagation(); choose(edgeId, { id: edgeId, title: road ? `${state.players.get(road.playerId)?.name}'s road` : "Open road", detail: road ? "A claimed connection" : "No road has been built here" }); }} onKeyDown={(event) => { if (legal && (event.key === "Enter" || event.key === " ")) onTarget(edgeId); }}>
               <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="transparent" strokeWidth="22" />
               {road && <><line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#f5ead1" strokeWidth="13" strokeLinecap="round" /><line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={colorsByPlayer?.get(road.playerId) ?? playerColor(state, road.playerId)} strokeWidth="8" strokeLinecap="round" /></>}
-              {legal && <line className="legal-road" x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#fff1a8" strokeWidth="8" strokeLinecap="round" filter="url(#target-glow)" />}
             </g>;
           })}
         </g>
@@ -194,7 +202,19 @@ export function SvgBoard({ state, targets, selectedId, onTarget, onInspect, colo
             </g>;
           })}
         </g>
+
+        <g className="targets-layer" pointerEvents="none">
+          {topology.edgeIds.filter((edgeId) => targets.ids.has(edgeId)).map((edgeId) => {
+            const edge = topology.edges.get(edgeId)!;
+            const a = xy(topology.vertices.get(edge.vertexIds[0])!.position);
+            const b = xy(topology.vertices.get(edge.vertexIds[1])!.position);
+            return <line key={edgeId} className="legal-road" x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#fff1a8" strokeWidth="9" strokeLinecap="round" filter="url(#target-glow)" />;
+          })}
+        </g>
       </svg>
+
+      {rollResult && <div className="dice-reveal" role="status" aria-live="assertive"><span className="eyebrow">Dice rolled</span><div><Die value={rollResult.dice[0]} /><Die value={rollResult.dice[1]} /><strong>{rollResult.total}</strong></div></div>}
+      {productionPayouts && <div className="production-flight" aria-label="Resources distributed">{Object.entries(productionPayouts).flatMap(([playerId, bundle]) => RESOURCE_TYPES.flatMap((resource) => bundle[resource] > 0 ? [<span key={`${playerId}-${resource}`} style={{ "--resource-color": RESOURCE_META[resource].color } as React.CSSProperties}><i />+{bundle[resource]} {RESOURCE_META[resource].label}<b>→ {state.players.get(playerId)?.name}</b></span>] : []))}</div>}
 
       <div className="board-tools" aria-label="Board zoom controls">
         <button type="button" onClick={() => zoom(.18)} aria-label="Zoom in"><Icon name="zoomIn" /></button>

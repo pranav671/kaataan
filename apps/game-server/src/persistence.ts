@@ -87,6 +87,8 @@ export interface PersistedRoom {
   readonly status: "lobby" | "playing" | "finished";
   readonly game: PersistedGameState | null;
   readonly tradeOffers: readonly PersistedTradeOffer[];
+  readonly turnDeadlineAt?: number | null;
+  readonly deadlineKey?: string | null;
 }
 
 interface PersistenceDocument {

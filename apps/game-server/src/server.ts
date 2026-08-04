@@ -32,6 +32,7 @@ export interface CreateServerOptions {
   readonly heartbeatIntervalMs?: number;
   readonly maxMessagesPerWindow?: number;
   readonly rateWindowMs?: number;
+  readonly turnTimerIntervalMs?: number;
 }
 
 function send(socket: WebSocket, message: ServerMessage): void {
@@ -256,6 +257,10 @@ export function createKaataanServer(options: CreateServerOptions = {}): KaataanS
     }
   }, options.heartbeatIntervalMs ?? 30_000);
   heartbeat.unref();
+  const turnTimer = setInterval(() => {
+    for (const result of rooms.expireTurns()) broadcastRoom(result.roomCode, result.events);
+  }, options.turnTimerIntervalMs ?? 500);
+  turnTimer.unref();
 
   return {
     httpServer,
@@ -275,6 +280,7 @@ export function createKaataanServer(options: CreateServerOptions = {}): KaataanS
     },
     close() {
       clearInterval(heartbeat);
+      clearInterval(turnTimer);
       for (const socket of sockets.clients) socket.terminate();
       return new Promise((resolve, reject) => {
         sockets.close(() => httpServer.close((error) => error ? reject(error) : resolve()));

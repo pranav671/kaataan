@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { playerScore, type EdgeId, type GameCommand, type HexId, type PlayerId, type ResourceBundle, type VertexId } from "@kaataan/game-engine";
 import type { DomesticTradeOfferView, PlayerColor, RoomSnapshot } from "@kaataan/protocol";
 
@@ -19,6 +19,19 @@ import { TradeOfferBanner } from "./TradeOfferBanner.tsx";
 
 const COLOR_VALUES: Record<PlayerColor, string> = { teal: "#156f62", coral: "#d85c41", gold: "#d9a52b", blue: "#526cc7", plum: "#8a57a3", umber: "#8a5a35" };
 
+function TurnTimer({ deadline }: { readonly deadline: number | null }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (deadline === null) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [deadline]);
+  if (deadline === null) return null;
+  const seconds = Math.max(0, Math.ceil((deadline - now) / 1_000));
+  return <div className={`turn-timer${seconds <= 15 ? " is-urgent" : ""}`} role="timer" aria-label={`${seconds} seconds remaining`}><span>Time left</span><strong>{String(Math.floor(seconds / 60)).padStart(2, "0")}:{String(seconds % 60).padStart(2, "0")}</strong></div>;
+}
+
 export function OnlineGameTable({ room, client, connection, events, error }: { readonly room: RoomSnapshot; readonly client: MultiplayerClient; readonly connection: ConnectionState; readonly events: Parameters<typeof projectedEventMessage>[0][]; readonly error: string | null }) {
   if (!room.game) return null;
   const state = useMemo(() => hydrateGameSnapshot(room.game!), [room.game]);
@@ -27,6 +40,12 @@ export function OnlineGameTable({ room, client, connection, events, error }: { r
   const [tradeOpen, setTradeOpen] = useState(false);
   const [counterOffer, setCounterOffer] = useState<DomesticTradeOfferView | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [rollEffect, setRollEffect] = useState<{ readonly dice: readonly [number, number]; readonly total: number } | null>(null);
+  const [productionEffect, setProductionEffect] = useState<Readonly<Record<PlayerId, ResourceBundle>> | null>(null);
+  const shownRollSequence = useRef(-1);
+  const shownProductionSequence = useRef(-1);
+  const rollTimer = useRef<number | null>(null);
+  const productionTimer = useRef<number | null>(null);
   const viewerId = room.viewerId as PlayerId;
   const activeActorId = actionPlayerId(state);
   const viewer = state.players.get(viewerId)!;
@@ -41,9 +60,34 @@ export function OnlineGameTable({ room, client, connection, events, error }: { r
   useEffect(() => {
     if (!error) return;
     setToast(error);
-    const timer = window.setTimeout(() => { setToast(null); client.clearError(); }, 4200);
-    return () => window.clearTimeout(timer);
+    client.clearError();
   }, [error, client]);
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 4200);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+  useEffect(() => {
+    const latest = events.filter((event) => event.type === "DICE_ROLLED" && Array.isArray(event.dice)).sort((left, right) => Number(right.sequence) - Number(left.sequence))[0];
+    if (!latest || Number(latest.sequence) <= shownRollSequence.current) return;
+    shownRollSequence.current = Number(latest.sequence);
+    const dice = latest.dice as unknown as readonly [number, number];
+    setRollEffect({ dice, total: Number(latest.total) });
+    if (rollTimer.current !== null) window.clearTimeout(rollTimer.current);
+    rollTimer.current = window.setTimeout(() => setRollEffect(null), 3600);
+  }, [events]);
+  useEffect(() => {
+    const latest = events.filter((event) => event.type === "PRODUCTION_DISTRIBUTED" && event.payouts).sort((left, right) => Number(right.sequence) - Number(left.sequence))[0];
+    if (!latest || Number(latest.sequence) <= shownProductionSequence.current) return;
+    shownProductionSequence.current = Number(latest.sequence);
+    setProductionEffect(latest.payouts as Readonly<Record<PlayerId, ResourceBundle>>);
+    if (productionTimer.current !== null) window.clearTimeout(productionTimer.current);
+    productionTimer.current = window.setTimeout(() => setProductionEffect(null), 3600);
+  }, [events]);
+  useEffect(() => () => {
+    if (rollTimer.current !== null) window.clearTimeout(rollTimer.current);
+    if (productionTimer.current !== null) window.clearTimeout(productionTimer.current);
+  }, []);
 
   function command(commandValue: GameCommand) {
     if (!viewerCanAct) return;
@@ -77,12 +121,12 @@ export function OnlineGameTable({ room, client, connection, events, error }: { r
 
   return <div className="app-shell">
     <header className="topbar"><a className="brand" href="#game"><span className="brand-mark"><i /><i /><i /></span><span>KAATAAN</span></a><div className="room-info"><span className="eyebrow">Private table</span><strong>Island {room.code} <i>•</i> {connection === "connected" ? "Live" : "Reconnecting"}</strong></div><div className="topbar-actions"><button type="button" className="invite-button" onClick={() => void copyInvite()}><Icon name="plus" />Invite friends</button><div className="profile-chip"><div style={{ background: colors.get(viewerId) }}>{viewer.name.slice(0, 1).toUpperCase()}</div><span><small>Your seat</small><strong>{viewer.name}</strong></span></div></div></header>
-    <main id="game" className="game-layout"><PlayerRail state={state} actorId={activeActorId} colorsByPlayer={colors} /><div className="game-center"><div className="game-statusbar"><div><span className="eyebrow">{state.phase.kind === "setup" ? "Opening placement" : `Paired turn ${state.pairedTurn}`}</span><h1>{viewerCanAct ? phaseLabel(state) : waitingName ? `${waitingName} is playing` : phaseLabel(state)}</h1></div><div className="status-actions"><span className={`connection-pill compact is-${connection}`}><i />{connection === "connected" ? "Live" : "Reconnecting"}</span><button type="button" className="text-button" onClick={() => client.leave()}>Leave table</button></div></div>
-      <SvgBoard state={state} targets={targets} selectedId={selection?.id ?? null} onTarget={selectBoardTarget} onInspect={setSelection} colorsByPlayer={colors} />
+    <main id="game" className="game-layout"><PlayerRail state={state} actorId={activeActorId} colorsByPlayer={colors} /><div className="game-center"><div className="game-statusbar"><div><span className="eyebrow">{state.phase.kind === "setup" ? "Opening placement" : `Paired turn ${state.pairedTurn}`}</span><h1>{viewerCanAct ? phaseLabel(state) : waitingName ? `${waitingName} is playing` : phaseLabel(state)}</h1></div><div className="status-actions"><TurnTimer deadline={room.turnDeadlineAt} /><span className={`connection-pill compact is-${connection}`}><i />{connection === "connected" ? "Live" : "Reconnecting"}</span><button type="button" className="text-button" onClick={() => client.leave()}>Leave table</button></div></div>
+      <SvgBoard state={state} targets={targets} selectedId={selection?.id ?? null} onTarget={selectBoardTarget} onInspect={setSelection} colorsByPlayer={colors} rollResult={rollEffect} productionPayouts={productionEffect} />
       {viewerCanAct && <PhasePrompt state={state} actorId={viewerId} onCommand={command} />}
       <ResourceHand state={state} playerId={viewerId} />
       {viewer.developmentCards.length > 0 && <section className="development-hand"><span>Development cards</span><div>{viewer.developmentCards.map((card) => <button type="button" key={card.id} disabled={!viewerCanAct || (card.type === "victory-point" ? victoryCards.length < victoryCardsNeeded : viewer.developmentCardPlayedThisTurn || card.purchasedPlayerTurn >= viewer.playerTurnSequence)} onClick={() => card.type === "victory-point" ? command({ type: "REVEAL_VICTORY_POINTS", cardIds: victoryCards.slice(0, victoryCardsNeeded).map((item) => item.id) }) : command({ type: "PLAY_DEVELOPMENT_CARD", cardId: card.id })}><Icon name={card.type === "knight" ? "helmet" : card.type === "road-building" ? "road" : "spark"} />{card.type === "victory-point" && victoryCards.length >= victoryCardsNeeded ? "Reveal to win" : card.type.replaceAll("-", " ")}</button>)}</div></section>}
-      {viewerCanAct && <ActionDock state={state} actorId={viewerId} selectedAction={action} onAction={setAction} onRoll={() => command({ type: "ROLL_DICE" })} onEndTurn={() => command({ type: "END_SUBTURN" })} onTrade={() => setTradeOpen(true)} onBuyDevelopment={() => command({ type: "BUY_DEVELOPMENT_CARD" })} />}
+      <ActionDock state={state} actorId={viewerId} disabled={!viewerCanAct} selectedAction={action} onAction={setAction} onRoll={() => command({ type: "ROLL_DICE" })} onEndTurn={() => command({ type: "END_SUBTURN" })} onTrade={() => setTradeOpen(true)} onBuyDevelopment={() => command({ type: "BUY_DEVELOPMENT_CARD" })} />
     </div><SidePanel state={state} events={activity} selection={selection} actorId={activeActorId} /></main>
     {tradeOpen && <TradeDialog state={state} actorId={viewerId} onClose={() => setTradeOpen(false)} onTrade={command} onDomesticOffer={offerTrade} />}
     {counterOffer && <TradeDialog state={state} actorId={viewerId} counterOffer={counterOffer} onClose={() => setCounterOffer(null)} onTrade={command} onCounter={counterTrade} />}

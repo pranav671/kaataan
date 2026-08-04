@@ -29,6 +29,7 @@ export interface RoomSnapshot {
   readonly viewerId: string;
   readonly members: readonly RoomMemberView[];
   readonly tradeOffers: readonly DomesticTradeOfferView[];
+  readonly turnDeadlineAt: number | null;
   readonly game: GameSnapshot | null;
 }
 

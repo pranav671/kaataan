@@ -1,6 +1,10 @@
 import { randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
+  activePlayerId,
+  checkRoadPlacement,
+  checkSettlementPlacement,
+  createResourceBundle,
   createGame,
   createVariableBoardLayout,
   createVariablePortPlacements,
@@ -12,7 +16,9 @@ import {
   type GameCommand,
   type GameEvent,
   type GameState,
+  type PlayerId,
   type ResourceBundle,
+  type ResourceType,
 } from "@kaataan/game-engine";
 import type {
   PlayerColor,
@@ -53,6 +59,8 @@ interface RoomRecord {
   status: "lobby" | "playing" | "finished";
   game: GameState | null;
   readonly tradeOffers: Map<string, DomesticTradeOffer>;
+  turnDeadlineAt: number | null;
+  deadlineKey: string | null;
 }
 
 interface DomesticTradeOffer {
@@ -88,6 +96,8 @@ export interface GameCommandResult {
 }
 
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const SETUP_TURN_MS = 2 * 60 * 1_000;
+const REGULAR_TURN_MS = 60 * 1_000;
 
 function secureCode(): string {
   let result = "";
@@ -131,6 +141,8 @@ export class RoomManager {
       status: "lobby",
       game: null,
       tradeOffers: new Map(),
+      turnDeadlineAt: null,
+      deadlineKey: null,
     };
     this.rooms.set(code, room);
     this.persist();
@@ -207,6 +219,7 @@ export class RoomManager {
       ports: createVariablePortPlacements(layout.topology, seed),
     });
     room.status = "playing";
+    this.refreshDeadline(room, true);
     this.persist();
     return room.game;
   }
@@ -313,6 +326,27 @@ export class RoomManager {
     });
   }
 
+  expireTurns(): readonly GameCommandResult[] {
+    const results: GameCommandResult[] = [];
+    const now = this.now();
+    for (const room of this.rooms.values()) {
+      if (room.status !== "playing" || !room.game || room.turnDeadlineAt === null || room.turnDeadlineAt > now) continue;
+      for (let guard = 0; guard < 3 && room.turnDeadlineAt !== null && room.turnDeadlineAt <= now; guard += 1) {
+        const timedCommand = this.commandForExpiredTurn(room.game);
+        if (!timedCommand) {
+          this.refreshDeadline(room, true);
+          break;
+        }
+        results.push(this.executeGameCommand(room, timedCommand.playerId, {
+          commandId: `timeout-${now}-${room.game.version}`,
+          expectedVersion: room.game.version,
+          command: timedCommand.command,
+        }));
+      }
+    }
+    return results;
+  }
+
   rejectDomesticTrade(roomCode: string, playerId: string, offerId: string): void {
     const room = this.getRoom(roomCode);
     const offer = room.tradeOffers.get(offerId);
@@ -351,6 +385,7 @@ export class RoomManager {
     room.game = result.state;
     room.tradeOffers.clear();
     if (room.game.phase.kind === "game-over") room.status = "finished";
+    this.refreshDeadline(room);
     this.persist();
     return { roomCode: room.code, state: room.game, events: result.events };
   }
@@ -418,6 +453,7 @@ export class RoomManager {
           isConnected: member.connectionIds.size > 0,
         })),
       tradeOffers: [...room.tradeOffers.values()].map((offer) => ({ ...offer })),
+      turnDeadlineAt: room.turnDeadlineAt,
       game: room.game ? projectGameForViewer(room.game, viewerId) : null,
     };
   }
@@ -477,7 +513,11 @@ export class RoomManager {
       status: stored.status,
       game: stored.game ? deserializeGameState(stored.game) : null,
       tradeOffers: new Map(stored.tradeOffers.map((offer) => [offer.id, { ...offer }])),
+      turnDeadlineAt: stored.turnDeadlineAt ?? null,
+      deadlineKey: stored.deadlineKey ?? null,
     });
+    const room = this.rooms.get(normalizeCode(stored.code));
+    if (room?.status === "playing") this.refreshDeadline(room, room.turnDeadlineAt === null);
   }
 
   private persist(): void {
@@ -497,6 +537,8 @@ export class RoomManager {
       status: room.status,
       game: room.game ? serializeGameState(room.game) : null,
       tradeOffers: [...room.tradeOffers.values()].map((offer) => ({ ...offer })),
+      turnDeadlineAt: room.turnDeadlineAt,
+      deadlineKey: room.deadlineKey,
     }));
     this.persistence.save(rooms);
   }
@@ -505,6 +547,122 @@ export class RoomManager {
     const room = this.rooms.get(normalizeCode(code));
     if (!room) throw new RoomError("ROOM_NOT_FOUND", "No room exists for that invite code");
     return room;
+  }
+
+  private deadlineKeyFor(state: GameState): string | null {
+    const phase = state.phase;
+    if (phase.kind === "game-over") return null;
+    if (phase.kind === "setup") return `setup:${phase.round}:${phase.seat}`;
+    if (phase.kind === "discarding") {
+      const playerId = Object.keys(phase.requiredByPlayer).find((id) => !phase.submittedPlayerIds.includes(id));
+      return playerId ? `discard:${state.pairedTurn}:${playerId}` : null;
+    }
+    const playerId = activePlayerId(state);
+    return playerId ? `turn:${state.pairedTurn}:${phase.kind}:${playerId}` : null;
+  }
+
+  private refreshDeadline(room: RoomRecord, force = false): void {
+    if (!room.game || room.status !== "playing") {
+      room.deadlineKey = null;
+      room.turnDeadlineAt = null;
+      return;
+    }
+    const key = this.deadlineKeyFor(room.game);
+    if (key === null) {
+      room.deadlineKey = null;
+      room.turnDeadlineAt = null;
+      return;
+    }
+    if (!force && key === room.deadlineKey && room.turnDeadlineAt !== null) return;
+    room.deadlineKey = key;
+    room.turnDeadlineAt = this.now() + (room.game.phase.kind === "setup" ? SETUP_TURN_MS : REGULAR_TURN_MS);
+  }
+
+  private commandForExpiredTurn(state: GameState): { readonly playerId: PlayerId; readonly command: GameCommand } | null {
+    const phase = state.phase;
+    if (phase.kind === "setup") {
+      const playerId = activePlayerId(state);
+      if (!playerId) return null;
+      const player = state.players.get(playerId);
+      if (!player) return null;
+      if (phase.step === "settlement") {
+        const vertexId = state.layout.topology.vertexIds.find((candidate) => checkSettlementPlacement(
+          state.layout.topology,
+          state.occupancy,
+          playerId,
+          candidate,
+          { setup: true, pieces: player.pieces },
+        ).legal);
+        return vertexId ? { playerId, command: { type: "PLACE_INITIAL_SETTLEMENT", vertexId } } : null;
+      }
+      if (!phase.pendingSettlementVertexId) return null;
+      const pendingSettlementVertexId = phase.pendingSettlementVertexId;
+      const edgeId = state.layout.topology.edgeIds.find((candidate) => checkRoadPlacement(
+        state.layout.topology,
+        state.occupancy,
+        playerId,
+        candidate,
+        { pieces: player.pieces, setupSettlementVertexId: pendingSettlementVertexId },
+      ).legal);
+      return edgeId ? { playerId, command: { type: "PLACE_INITIAL_ROAD", edgeId } } : null;
+    }
+    if (phase.kind === "discarding") {
+      const playerId = Object.keys(phase.requiredByPlayer).find((id) => !phase.submittedPlayerIds.includes(id));
+      if (!playerId) return null;
+      const required = phase.requiredByPlayer[playerId] ?? 0;
+      const hand = state.players.get(playerId)?.hand;
+      if (!hand) return null;
+      const resources = { ...createResourceBundle() } as Record<ResourceType, number>;
+      let remaining = required;
+      for (const resource of RESOURCE_TYPES) {
+        const amount = Math.min(hand[resource], remaining);
+        resources[resource] = amount;
+        remaining -= amount;
+      }
+      return { playerId, command: { type: "SUBMIT_DISCARD", resources } };
+    }
+    const playerId = activePlayerId(state);
+    if (!playerId) return null;
+    if (phase.kind === "player1-pre-roll") return { playerId, command: { type: "ROLL_DICE" } };
+    if (phase.kind === "player1-actions" || phase.kind === "player2-actions") return { playerId, command: { type: "END_SUBTURN" } };
+    if (phase.kind === "robber-move") {
+      const hexId = state.layout.topology.hexIds.find((id) => id !== state.layout.robberHexId);
+      return hexId ? { playerId, command: { type: "MOVE_ROBBER", hexId } } : null;
+    }
+    if (phase.kind === "robber-steal") {
+      const targetPlayerId = phase.eligibleTargetIds[0];
+      return targetPlayerId ? { playerId, command: { type: "STEAL_FROM_PLAYER", targetPlayerId } } : null;
+    }
+    if (phase.kind === "road-building") {
+      const player = state.players.get(playerId);
+      const edgeId = player && state.layout.topology.edgeIds.find((candidate) => checkRoadPlacement(
+        state.layout.topology,
+        state.occupancy,
+        playerId,
+        candidate,
+        { pieces: player.pieces },
+      ).legal);
+      return edgeId ? { playerId, command: { type: "PLACE_FREE_ROAD", edgeId } } : null;
+    }
+    if (phase.kind === "year-of-plenty") {
+      const resources = { ...createResourceBundle() } as Record<ResourceType, number>;
+      let remaining = phase.requiredCards;
+      for (const resource of RESOURCE_TYPES) {
+        const amount = Math.min(state.bank[resource], remaining);
+        resources[resource] = amount;
+        remaining -= amount;
+      }
+      return { playerId, command: { type: "TAKE_YEAR_OF_PLENTY", resources } };
+    }
+    if (phase.kind === "monopoly") {
+      const resource = RESOURCE_TYPES.reduce((best, candidate) => {
+        const count = [...state.players.values()].reduce((total, player) => total + (player.id === playerId ? 0 : player.hand[candidate]), 0);
+        const bestCount = [...state.players.values()].reduce((total, player) => total + (player.id === playerId ? 0 : player.hand[best]), 0);
+        return count > bestCount ? candidate : best;
+      }, RESOURCE_TYPES[0] as ResourceType);
+      return { playerId, command: { type: "CHOOSE_MONOPOLY_RESOURCE", resource } };
+    }
+    return null;
   }
 
   private getMember(room: RoomRecord, playerId: string): RoomMember {

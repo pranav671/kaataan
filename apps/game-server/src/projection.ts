@@ -141,6 +141,7 @@ export function projectEventForViewer(
       sequence: event.sequence,
       type: event.type,
       counts: Object.fromEntries(Object.entries(event.payouts).map(([id, bundle]) => [id, resourceCount(bundle)])),
+      payouts: event.payouts,
       privatePayout: event.payouts[viewerId] ?? null,
     };
   }
@@ -176,7 +177,7 @@ export function projectEventForViewer(
     return { sequence: event.sequence, type: event.type, playerId: event.playerId, edgeId: event.edgeId };
   }
   if (event.type === "DICE_ROLLED") {
-    return { sequence: event.sequence, type: event.type, playerId: event.playerId, total: event.total };
+    return { sequence: event.sequence, type: event.type, playerId: event.playerId, dice: event.dice, total: event.total };
   }
   if (event.type === "PLAYER_TURN_STARTED") {
     return { sequence: event.sequence, type: event.type, playerId: event.playerId };

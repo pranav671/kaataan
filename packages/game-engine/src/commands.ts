@@ -401,7 +401,7 @@ export function handleCommand(
     }
     const total = dice[0] + dice[1];
     const events: UnsequencedGameEvent[] = [
-      { type: "DICE_ROLLED", playerId: envelope.actorId, total },
+      { type: "DICE_ROLLED", playerId: envelope.actorId, dice, total },
     ];
     if (total === 7) {
       const requiredByPlayer = requiredDiscardsByPlayer(state);

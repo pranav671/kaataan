@@ -835,9 +835,6 @@ export function handleCommand(
   }
 
   if (command.type === "DOMESTIC_TRADE") {
-    if (state.phase.kind !== "player1-actions" || playerOneId(state) !== envelope.actorId) {
-      return reject(state, "WRONG_PHASE");
-    }
     const partner = state.players.get(command.partnerId);
     if (!partner) return reject(state, "UNKNOWN_PLAYER");
     const validation = validateDomesticTrade({

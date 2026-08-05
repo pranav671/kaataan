@@ -12,6 +12,14 @@ import type { PlayerColor } from "./schema.ts";
 
 export type RoomStatus = "lobby" | "playing" | "finished";
 
+export interface TurnTimerSettings {
+  readonly setupSeconds: number;
+  readonly rollSeconds: number;
+  readonly actionSeconds: number;
+  readonly robberSeconds: number;
+  readonly discardSeconds: number;
+}
+
 export interface RoomMemberView {
   readonly id: string;
   readonly name: string;
@@ -29,7 +37,10 @@ export interface RoomSnapshot {
   readonly viewerId: string;
   readonly members: readonly RoomMemberView[];
   readonly tradeOffers: readonly DomesticTradeOfferView[];
+  readonly timerSettings: TurnTimerSettings;
   readonly turnDeadlineAt: number | null;
+  readonly activity: readonly ProjectedGameEvent[];
+  readonly endedReason: "host-ended-offline" | null;
   readonly game: GameSnapshot | null;
 }
 
@@ -82,6 +93,7 @@ export interface PlayerGameView {
   readonly developmentCardCount: number;
   readonly publicScore: number;
   readonly playedKnights: number;
+  readonly playedDevelopmentCardCount?: number;
   readonly playerTurnSequence: number;
   readonly developmentCardPlayedThisTurn: boolean;
   readonly hand: ResourceBundle | null;

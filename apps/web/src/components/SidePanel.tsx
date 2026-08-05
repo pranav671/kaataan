@@ -22,7 +22,7 @@ export function SidePanel({ state, events, selection, actorId }: { readonly stat
         <div className="panel-heading"><span>Game activity</span><span className="event-count">{events.length}</span></div>
         <div className="activity-list">
           {events.length === 0 && <div className="empty-activity"><Icon name="target" /><span>Your story begins with the first settlement.</span></div>}
-          {events.slice(0, 8).map((message, index) => <div className="activity-item" key={`${index}-${message}`}><i /><span>{message}</span></div>)}
+          {events.map((message, index) => <div className="activity-item" key={`${index}-${message}`}><i /><span>{message}</span></div>)}
         </div>
       </section>
       <section className="award-strip"><div><Icon name="road" /><span>Longest road</span><strong>{state.longestRoadHolderId ? state.players.get(state.longestRoadHolderId)?.name : "Unclaimed"}</strong></div><div><Icon name="helmet" /><span>Largest army</span><strong>{state.largestArmyHolderId ? state.players.get(state.largestArmyHolderId)?.name : "Unclaimed"}</strong></div></section>

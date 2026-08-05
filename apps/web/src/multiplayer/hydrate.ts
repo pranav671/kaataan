@@ -108,6 +108,14 @@ export function hydrateGameSnapshot(snapshot: GameSnapshot): GameState {
         playedPlayerTurn: player.playerTurnSequence,
       });
     }
+    for (let index = revealedPoints; index < (player.playedDevelopmentCardCount ?? revealedPoints); index += 1) {
+      resolvedDevelopmentCards.push({
+        id: `dev:${syntheticCardId++}`,
+        type: "knight",
+        playerId: player.id,
+        playedPlayerTurn: player.playerTurnSequence,
+      });
+    }
   }
   const developmentDeck: DevelopmentCardDefinition[] = Array.from(
     { length: snapshot.developmentDeckCount },

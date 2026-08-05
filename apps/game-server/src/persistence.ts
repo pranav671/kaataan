@@ -6,6 +6,7 @@ import type {
   EdgeId,
   EdgeTopology,
   GamePhase,
+  GameEvent,
   GameState,
   HexId,
   HexTile,
@@ -18,7 +19,7 @@ import type {
   VertexId,
   VertexTopology,
 } from "@kaataan/game-engine";
-import type { PlayerColor } from "@kaataan/protocol";
+import type { PlayerColor, TurnTimerSettings } from "@kaataan/protocol";
 
 export const PERSISTENCE_FORMAT_VERSION = 1;
 
@@ -87,6 +88,9 @@ export interface PersistedRoom {
   readonly status: "lobby" | "playing" | "finished";
   readonly game: PersistedGameState | null;
   readonly tradeOffers: readonly PersistedTradeOffer[];
+  readonly timerSettings?: TurnTimerSettings;
+  readonly gameEvents?: readonly GameEvent[];
+  readonly endedReason?: "host-ended-offline" | null;
   readonly turnDeadlineAt?: number | null;
   readonly deadlineKey?: string | null;
 }

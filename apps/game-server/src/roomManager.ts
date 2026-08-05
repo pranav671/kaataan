@@ -10,7 +10,6 @@ import {
   createVariablePortPlacements,
   handleCommand,
   containsResources,
-  playerIdAtSeat,
   RESOURCE_TYPES,
   totalResources,
   type GameCommand,
@@ -25,6 +24,7 @@ import type {
   PlayerSessionCredentials,
   RoomMemberView,
   RoomSnapshot,
+  TurnTimerSettings,
 } from "@kaataan/protocol";
 
 import { RoomError, requireRoom } from "./errors.ts";
@@ -34,7 +34,7 @@ import {
   type PersistedRoom,
   type RoomPersistence,
 } from "./persistence.ts";
-import { projectGameForViewer } from "./projection.ts";
+import { projectEventsForViewer, projectGameForViewer } from "./projection.ts";
 
 export interface RoomProfile {
   readonly name: string;
@@ -59,6 +59,9 @@ interface RoomRecord {
   status: "lobby" | "playing" | "finished";
   game: GameState | null;
   readonly tradeOffers: Map<string, DomesticTradeOffer>;
+  timerSettings: TurnTimerSettings;
+  gameEvents: GameEvent[];
+  endedReason: "host-ended-offline" | null;
   turnDeadlineAt: number | null;
   deadlineKey: string | null;
 }
@@ -96,8 +99,13 @@ export interface GameCommandResult {
 }
 
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const SETUP_TURN_MS = 2 * 60 * 1_000;
-const REGULAR_TURN_MS = 60 * 1_000;
+export const DEFAULT_TURN_TIMER_SETTINGS: TurnTimerSettings = {
+  setupSeconds: 120,
+  rollSeconds: 60,
+  actionSeconds: 60,
+  robberSeconds: 60,
+  discardSeconds: 60,
+};
 
 function secureCode(): string {
   let result = "";
@@ -141,6 +149,9 @@ export class RoomManager {
       status: "lobby",
       game: null,
       tradeOffers: new Map(),
+      timerSettings: DEFAULT_TURN_TIMER_SETTINGS,
+      gameEvents: [],
+      endedReason: null,
       turnDeadlineAt: null,
       deadlineKey: null,
     };
@@ -180,6 +191,8 @@ export class RoomManager {
       "The reconnect credential is invalid",
     );
     member.connectionIds.add(connectionId);
+    this.ensureConnectedHost(room);
+    this.persist();
     return this.snapshotFor(room.code, member.id);
   }
 
@@ -197,6 +210,15 @@ export class RoomManager {
     const room = this.getRoom(roomCode);
     requireRoom(room.status === "lobby", "ROOM_ALREADY_STARTED", "Readiness is locked after the game starts");
     this.getMember(room, playerId).isReady = ready;
+    this.persist();
+  }
+
+  updateTimerSettings(roomCode: string, playerId: string, settings: TurnTimerSettings): void {
+    const room = this.getRoom(roomCode);
+    requireRoom(room.status === "lobby", "ROOM_ALREADY_STARTED", "Turn timers are locked after the game starts");
+    requireRoom(room.hostId === playerId, "HOST_ONLY", "Only the host can configure turn timers");
+    requireRoom(Object.values(settings).every((seconds) => Number.isSafeInteger(seconds) && seconds >= 15 && seconds <= 600), "INVALID_TIMER_SETTINGS", "Every turn timer must be between 15 and 600 seconds");
+    room.timerSettings = { ...settings };
     this.persist();
   }
 
@@ -219,6 +241,8 @@ export class RoomManager {
       ports: createVariablePortPlacements(layout.topology, seed),
     });
     room.status = "playing";
+    room.gameEvents = [];
+    room.endedReason = null;
     this.refreshDeadline(room, true);
     this.persist();
     return room.game;
@@ -249,9 +273,9 @@ export class RoomManager {
     requireRoom(room.status === "playing" && room.game, "GAME_NOT_ACTIVE", "This room does not have an active game");
     const game = room.game;
     requireRoom(game.version === input.expectedVersion, "STALE_VERSION", "The game changed before this offer was created");
-    requireRoom(game.phase.kind === "player1-actions", "WRONG_PHASE", "Domestic trades are available only during Player 1 actions");
-    const activeId = playerIdAtSeat(game, game.player1Seat);
-    requireRoom(activeId === playerId, "NOT_YOUR_TURN", "Only the active Player 1 can propose a domestic trade");
+    requireRoom(game.phase.kind === "player1-actions" || game.phase.kind === "player2-actions", "WRONG_PHASE", "Domestic trades are available during either active player's actions");
+    const activeId = activePlayerId(game);
+    requireRoom(activeId === playerId, "NOT_YOUR_TURN", "Only the active player can propose a domestic trade");
     const actor = game.players.get(playerId);
     const partner = game.players.get(input.partnerId);
     requireRoom(actor && partner, "UNKNOWN_PLAYER", "The selected trade partner is unavailable");
@@ -330,8 +354,9 @@ export class RoomManager {
     const results: GameCommandResult[] = [];
     const now = this.now();
     for (const room of this.rooms.values()) {
-      if (room.status !== "playing" || !room.game || room.turnDeadlineAt === null || room.turnDeadlineAt > now) continue;
-      for (let guard = 0; guard < 3 && room.turnDeadlineAt !== null && room.turnDeadlineAt <= now; guard += 1) {
+      if (room.status !== "playing" || !room.game || room.turnDeadlineAt === null) continue;
+      if (room.turnDeadlineAt > now && !this.offlineAutoCommandDue(room)) continue;
+      for (let guard = 0; guard < 4 && room.turnDeadlineAt !== null && (room.turnDeadlineAt <= now || this.offlineAutoCommandDue(room)); guard += 1) {
         const timedCommand = this.commandForExpiredTurn(room.game);
         if (!timedCommand) {
           this.refreshDeadline(room, true);
@@ -383,11 +408,25 @@ export class RoomManager {
     });
     if (!result.accepted) throw new RoomError(result.code, result.detail ?? "The game command was rejected");
     room.game = result.state;
+    room.gameEvents.push(...result.events);
     room.tradeOffers.clear();
     if (room.game.phase.kind === "game-over") room.status = "finished";
     this.refreshDeadline(room);
     this.persist();
     return { roomCode: room.code, state: room.game, events: result.events };
+  }
+
+  endGameForOfflinePlayers(roomCode: string, playerId: string): void {
+    const room = this.getRoom(roomCode);
+    requireRoom(room.status === "playing", "GAME_NOT_ACTIVE", "This room does not have an active game");
+    requireRoom(room.hostId === playerId, "HOST_ONLY", "Only the host can end the game");
+    const offlineCount = [...room.members.values()].filter((member) => member.connectionIds.size === 0).length;
+    requireRoom(offlineCount > 2, "NOT_ENOUGH_OFFLINE", "At least three players must be offline before ending the game");
+    room.status = "finished";
+    room.endedReason = "host-ended-offline";
+    room.tradeOffers.clear();
+    this.refreshDeadline(room, true);
+    this.persist();
   }
 
   leaveRoom(roomCode: string, playerId: string): boolean {
@@ -428,8 +467,12 @@ export class RoomManager {
       for (const member of room.members.values()) {
         if (member.connectionIds.delete(connectionId)) changed = true;
       }
-      if (changed) affected.push(room.code);
+      if (changed) {
+        this.ensureConnectedHost(room);
+        affected.push(room.code);
+      }
     }
+    if (affected.length > 0) this.persist();
     return affected;
   }
 
@@ -453,7 +496,10 @@ export class RoomManager {
           isConnected: member.connectionIds.size > 0,
         })),
       tradeOffers: [...room.tradeOffers.values()].map((offer) => ({ ...offer })),
+      timerSettings: room.timerSettings,
       turnDeadlineAt: room.turnDeadlineAt,
+      activity: projectEventsForViewer(room.gameEvents, viewerId),
+      endedReason: room.endedReason,
       game: room.game ? projectGameForViewer(room.game, viewerId) : null,
     };
   }
@@ -513,6 +559,9 @@ export class RoomManager {
       status: stored.status,
       game: stored.game ? deserializeGameState(stored.game) : null,
       tradeOffers: new Map(stored.tradeOffers.map((offer) => [offer.id, { ...offer }])),
+      timerSettings: stored.timerSettings ?? DEFAULT_TURN_TIMER_SETTINGS,
+      gameEvents: [...(stored.gameEvents ?? [])],
+      endedReason: stored.endedReason ?? null,
       turnDeadlineAt: stored.turnDeadlineAt ?? null,
       deadlineKey: stored.deadlineKey ?? null,
     });
@@ -537,6 +586,9 @@ export class RoomManager {
       status: room.status,
       game: room.game ? serializeGameState(room.game) : null,
       tradeOffers: [...room.tradeOffers.values()].map((offer) => ({ ...offer })),
+      timerSettings: room.timerSettings,
+      gameEvents: room.gameEvents,
+      endedReason: room.endedReason,
       turnDeadlineAt: room.turnDeadlineAt,
       deadlineKey: room.deadlineKey,
     }));
@@ -575,7 +627,37 @@ export class RoomManager {
     }
     if (!force && key === room.deadlineKey && room.turnDeadlineAt !== null) return;
     room.deadlineKey = key;
-    room.turnDeadlineAt = this.now() + (room.game.phase.kind === "setup" ? SETUP_TURN_MS : REGULAR_TURN_MS);
+    room.turnDeadlineAt = this.now() + this.deadlineSeconds(room.game, room.timerSettings) * 1_000;
+  }
+
+  private deadlineSeconds(state: GameState, settings: TurnTimerSettings): number {
+    const phase = state.phase;
+    if (phase.kind === "setup") return settings.setupSeconds;
+    if (phase.kind === "player1-pre-roll") return settings.rollSeconds;
+    if (phase.kind === "discarding") return settings.discardSeconds;
+    if (phase.kind === "robber-move" || phase.kind === "robber-steal") return settings.robberSeconds;
+    return settings.actionSeconds;
+  }
+
+  private offlineAutoCommandDue(room: RoomRecord): boolean {
+    if (!room.game || (room.game.phase.kind !== "player1-pre-roll" && room.game.phase.kind !== "player1-actions" && room.game.phase.kind !== "player2-actions")) return false;
+    const playerId = activePlayerId(room.game);
+    return Boolean(playerId && room.members.get(playerId)?.connectionIds.size === 0);
+  }
+
+  private ensureConnectedHost(room: RoomRecord): void {
+    const host = room.members.get(room.hostId);
+    if (host && host.connectionIds.size > 0) return;
+    const connected = [...room.members.values()].filter((member) => member.connectionIds.size > 0);
+    if (connected.length === 0) return;
+    const hostSeat = host?.seat ?? -1;
+    const seatSpan = Math.max(...[...room.members.values()].map((member) => member.seat)) + 1;
+    connected.sort((left, right) => {
+      const leftDistance = (left.seat - hostSeat + seatSpan) % seatSpan;
+      const rightDistance = (right.seat - hostSeat + seatSpan) % seatSpan;
+      return leftDistance - rightDistance;
+    });
+    room.hostId = connected[0]!.id;
   }
 
   private commandForExpiredTurn(state: GameState): { readonly playerId: PlayerId; readonly command: GameCommand } | null {

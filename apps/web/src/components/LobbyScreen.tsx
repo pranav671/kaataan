@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import type { PlayerColor, RoomSnapshot } from "@kaataan/protocol";
+import type { PlayerColor, RoomSnapshot, TurnTimerSettings } from "@kaataan/protocol";
 
 import type { ConnectionState, MultiplayerClient } from "../multiplayer/client.ts";
 import { PLAYER_COLOR_OPTIONS } from "./WelcomeScreen.tsx";
@@ -10,9 +10,11 @@ export function LobbyScreen({ room, client, connection, error }: { readonly room
   const [color, setColor] = useState<PlayerColor>(viewer.color);
   const [copied, setCopied] = useState(false);
   const [pendingKickId, setPendingKickId] = useState<string | null>(null);
+  const [timerSettings, setTimerSettings] = useState<TurnTimerSettings>(room.timerSettings);
   const allReady = room.members.length >= 5 && room.members.every((member) => member.isReady && member.isConnected);
   const inviteUrl = `${window.location.origin}${window.location.pathname}?room=${room.code}`;
   useEffect(() => { setName(viewer.name); setColor(viewer.color); }, [viewer.name, viewer.color]);
+  useEffect(() => { setTimerSettings(room.timerSettings); }, [room.timerSettings]);
   useEffect(() => { if (pendingKickId && !room.members.some((member) => member.id === pendingKickId)) setPendingKickId(null); }, [room.members, pendingKickId]);
 
   async function copyInvite() {
@@ -24,6 +26,17 @@ export function LobbyScreen({ room, client, connection, error }: { readonly room
     event.preventDefault();
     if (name.trim().length >= 2) client.updateProfile({ name: name.trim(), color });
   }
+  function saveTimers(event: FormEvent) {
+    event.preventDefault();
+    client.updateTimerSettings(timerSettings);
+  }
+  const timerFields: readonly [keyof TurnTimerSettings, string, string][] = [
+    ["setupSeconds", "Opening placement", "Settlement + road"],
+    ["rollSeconds", "Dice roll", "Before the system rolls"],
+    ["actionSeconds", "Trade & construction", "Each action subturn"],
+    ["robberSeconds", "Robber", "Move and steal"],
+    ["discardSeconds", "Discard", "Per required player"],
+  ];
 
   return <main className="lobby-shell">
     <header className="lobby-topbar"><a className="brand" href="/"><span className="brand-mark"><i /><i /><i /></span><span>KAATAAN</span></a><span className={`connection-pill compact is-${connection}`}><i />{connection === "connected" ? "Live" : "Reconnecting"}</span></header>
@@ -40,6 +53,7 @@ export function LobbyScreen({ room, client, connection, error }: { readonly room
         })}</div></section>
         <aside className="lobby-sidebar"><form className="profile-editor" onSubmit={saveProfile}><span className="eyebrow">Your profile</span><label><span>Name</span><input value={name} maxLength={24} onChange={(event) => setName(event.target.value)} /></label><fieldset className="color-field"><legend>Playing color</legend><div>{PLAYER_COLOR_OPTIONS.map((option) => <button key={option.id} type="button" disabled={room.members.some((member) => member.id !== viewer.id && member.color === option.id)} className={color === option.id ? "selected" : ""} aria-label={option.label} style={{ "--swatch": option.value } as React.CSSProperties} onClick={() => setColor(option.id)}><i /></button>)}</div></fieldset><button className="profile-save" disabled={name.trim().length < 2 || (name.trim() === viewer.name && color === viewer.color)}>Save profile</button></form>
           <section className="ready-panel"><div><span className="eyebrow">Before launch</span><h3>{viewer.isReady ? "You’re ready" : "Ready to settle?"}</h3><p>You can still change your mind until the host starts.</p></div><button className={viewer.isReady ? "unready" : ""} type="button" onClick={() => client.setReady(!viewer.isReady)}>{viewer.isReady ? "Not ready yet" : "Mark me ready"}</button></section>
+          {viewer.isHost && <form className="timer-panel" onSubmit={saveTimers}><span className="eyebrow">Turn timers</span><h3>Table pace</h3><div className="timer-fields">{timerFields.map(([key, label, hint]) => <label key={key}><span><strong>{label}</strong><small>{hint}</small></span><span><input type="number" min={15} max={600} value={timerSettings[key]} onChange={(event) => setTimerSettings({ ...timerSettings, [key]: Math.max(15, Math.min(600, Number(event.target.value) || 15)) })} /><small>sec</small></span></label>)}</div><button className="profile-save" type="submit" disabled={JSON.stringify(timerSettings) === JSON.stringify(room.timerSettings)}>Save timing</button></form>}
           {viewer.isHost && <section className="host-panel"><span className="eyebrow">Host controls</span><button type="button" disabled={!allReady || connection !== "connected"} onClick={() => client.startGame()}>Start game <span>→</span></button><p>{room.members.length < 5 ? `${5 - room.members.length} more player${5 - room.members.length === 1 ? "" : "s"} needed` : !allReady ? "Waiting for everyone to be ready" : "Your table is ready to begin"}</p></section>}
           {error && <p className="form-error" role="alert">{error}</p>}
         </aside>

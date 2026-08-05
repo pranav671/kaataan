@@ -4,6 +4,7 @@ import type {
   PlayerSessionCredentials,
   ProjectedGameEvent,
   RoomSnapshot,
+  TurnTimerSettings,
   ServerMessage,
 } from "@kaataan/protocol";
 import type { GameCommand, ResourceBundle } from "@kaataan/game-engine";
@@ -96,7 +97,9 @@ export class MultiplayerClient {
   }
 
   setReady(ready: boolean): void { this.send({ type: "room.set_ready", requestId: this.id("ready"), ready }); }
+  updateTimerSettings(settings: TurnTimerSettings): void { this.send({ type: "room.update_timer_settings", requestId: this.id("timers"), settings }); }
   startGame(): void { this.send({ type: "room.start", requestId: this.id("start") }); }
+  endGame(): void { this.send({ type: "room.end_game", requestId: this.id("end-game") }); }
   kickPlayer(playerId: string): void { this.send({ type: "room.kick", requestId: this.id("kick"), playerId }); }
 
   gameCommand(expectedVersion: number, command: GameCommand): void {

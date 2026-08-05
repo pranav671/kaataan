@@ -78,6 +78,7 @@ export function projectGameForViewer(state: GameState, viewerId: PlayerId): Game
         developmentCardCount: player.developmentCards.length,
         publicScore: playerScore(state, playerId).publicScore,
         playedKnights: player.playedKnights,
+        playedDevelopmentCardCount: state.resolvedDevelopmentCards.filter((card) => card.playerId === playerId).length,
         playerTurnSequence: player.playerTurnSequence,
         developmentCardPlayedThisTurn: player.developmentCardPlayedThisTurn,
         hand: ownView ? player.hand : null,
@@ -119,7 +120,14 @@ export function projectEventForViewer(
     return projectRobberEventForViewer(event, viewerId) as ProjectedGameEvent;
   }
   if (event.type === "RESOURCE_STOLEN") {
-    return projectRobberEventForViewer(event, viewerId) as ProjectedGameEvent;
+    return {
+      sequence: event.sequence,
+      type: event.type,
+      playerId: event.playerId,
+      targetPlayerId: event.targetPlayerId,
+      count: event.resource === null ? 0 : 1,
+      resource: event.resource,
+    };
   }
   if (event.type === "VICTORY_POINT_CARDS_REVEALED"
     || event.type === "LONGEST_ROAD_HOLDER_CHANGED"

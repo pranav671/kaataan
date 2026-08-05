@@ -166,6 +166,11 @@ export function createKaataanServer(options: CreateServerOptions = {}): KaataanS
           broadcastRoom(session.roomCode);
           return;
         }
+        if (message.type === "room.update_timer_settings") {
+          rooms.updateTimerSettings(session.roomCode, session.playerId, message.settings);
+          broadcastRoom(session.roomCode);
+          return;
+        }
         if (message.type === "room.start") {
           rooms.startGame(session.roomCode, session.playerId);
           broadcastRoom(session.roomCode);
@@ -176,6 +181,11 @@ export function createKaataanServer(options: CreateServerOptions = {}): KaataanS
           const deleted = rooms.leaveRoom(roomCode, session.playerId);
           socketSessions.delete(socket);
           if (!deleted) broadcastRoom(roomCode);
+          return;
+        }
+        if (message.type === "room.end_game") {
+          rooms.endGameForOfflinePlayers(session.roomCode, session.playerId);
+          broadcastRoom(session.roomCode);
           return;
         }
         if (message.type === "room.kick") {

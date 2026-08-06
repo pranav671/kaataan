@@ -194,6 +194,9 @@ export function pairedRole(state: GameState, playerId: PlayerId): string | null 
   return null;
 }
 
-export function displayedScore(state: GameState, playerId: PlayerId): number {
-  return playerScore(state, playerId).publicScore;
+export function displayedScore(state: GameState, playerId: PlayerId, viewerId?: PlayerId): number {
+  const score = playerScore(state, playerId);
+  return playerId === viewerId || state.phase.kind === "game-over"
+    ? score.authoritativeScore
+    : score.publicScore;
 }

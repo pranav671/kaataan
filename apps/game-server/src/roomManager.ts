@@ -1,24 +1,31 @@
 import { randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
+  activePlayerId,
+  checkRoadPlacement,
+  checkSettlementPlacement,
+  createResourceBundle,
   createGame,
   createVariableBoardLayout,
   createVariablePortPlacements,
   handleCommand,
   containsResources,
-  playerIdAtSeat,
   RESOURCE_TYPES,
   totalResources,
   type GameCommand,
   type GameEvent,
   type GameState,
+  type PlayerId,
   type ResourceBundle,
+  type ResourceType,
 } from "@kaataan/game-engine";
 import type {
+  DiceStatisticsView,
   PlayerColor,
   PlayerSessionCredentials,
   RoomMemberView,
   RoomSnapshot,
+  TurnTimerSettings,
 } from "@kaataan/protocol";
 
 import { RoomError, requireRoom } from "./errors.ts";
@@ -28,7 +35,7 @@ import {
   type PersistedRoom,
   type RoomPersistence,
 } from "./persistence.ts";
-import { projectGameForViewer } from "./projection.ts";
+import { projectEventsForViewer, projectGameForViewer } from "./projection.ts";
 
 export interface RoomProfile {
   readonly name: string;
@@ -53,17 +60,31 @@ interface RoomRecord {
   status: "lobby" | "playing" | "finished";
   game: GameState | null;
   readonly tradeOffers: Map<string, DomesticTradeOffer>;
+  timerSettings: TurnTimerSettings;
+  gameEvents: GameEvent[];
+  endedReason: "host-ended-offline" | null;
+  turnDeadlineAt: number | null;
+  deadlineKey: string | null;
 }
 
 interface DomesticTradeOffer {
   readonly id: string;
   readonly actorId: string;
-  readonly partnerId: string;
+  readonly partnerId?: string;
   readonly proposedById: string;
   readonly actorGives: ResourceBundle;
   readonly partnerGives: ResourceBundle;
+  readonly responses: Map<string, DomesticTradeResponse>;
   readonly gameVersion: number;
   readonly createdAt: number;
+}
+
+interface DomesticTradeResponse {
+  readonly playerId: string;
+  readonly status: "accepted" | "declined" | "countered";
+  readonly actorGives?: ResourceBundle;
+  readonly partnerGives?: ResourceBundle;
+  readonly updatedAt: number;
 }
 
 export interface RoomManagerOptions {
@@ -88,6 +109,13 @@ export interface GameCommandResult {
 }
 
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+export const DEFAULT_TURN_TIMER_SETTINGS: TurnTimerSettings = {
+  setupSeconds: 120,
+  rollSeconds: 60,
+  actionSeconds: 60,
+  robberSeconds: 60,
+  discardSeconds: 60,
+};
 
 function secureCode(): string {
   let result = "";
@@ -101,6 +129,7 @@ function normalizeCode(code: string): string {
 
 export class RoomManager {
   private readonly rooms = new Map<string, RoomRecord>();
+  private readonly globalDiceRolls = new Map<number, number>(Array.from({ length: 11 }, (_, index) => [index + 2, 0]));
   private readonly createId: () => string;
   private readonly createToken: () => string;
   private readonly createCode: () => string;
@@ -118,6 +147,12 @@ export class RoomManager {
     this.now = options.now ?? Date.now;
     this.persistence = options.persistence;
     for (const stored of this.persistence?.load() ?? []) this.restoreRoom(stored);
+    for (const [total, count] of Object.entries(this.persistence?.loadDiceStatistics?.() ?? {})) {
+      const numericTotal = Number(total);
+      if (numericTotal >= 2 && numericTotal <= 12 && Number.isSafeInteger(count) && count >= 0) {
+        this.globalDiceRolls.set(numericTotal, count);
+      }
+    }
   }
 
   createRoom(profile: RoomProfile, connectionId: string): SessionResult {
@@ -131,6 +166,11 @@ export class RoomManager {
       status: "lobby",
       game: null,
       tradeOffers: new Map(),
+      timerSettings: DEFAULT_TURN_TIMER_SETTINGS,
+      gameEvents: [],
+      endedReason: null,
+      turnDeadlineAt: null,
+      deadlineKey: null,
     };
     this.rooms.set(code, room);
     this.persist();
@@ -168,6 +208,8 @@ export class RoomManager {
       "The reconnect credential is invalid",
     );
     member.connectionIds.add(connectionId);
+    this.ensureConnectedHost(room);
+    this.persist();
     return this.snapshotFor(room.code, member.id);
   }
 
@@ -185,6 +227,15 @@ export class RoomManager {
     const room = this.getRoom(roomCode);
     requireRoom(room.status === "lobby", "ROOM_ALREADY_STARTED", "Readiness is locked after the game starts");
     this.getMember(room, playerId).isReady = ready;
+    this.persist();
+  }
+
+  updateTimerSettings(roomCode: string, playerId: string, settings: TurnTimerSettings): void {
+    const room = this.getRoom(roomCode);
+    requireRoom(room.status === "lobby", "ROOM_ALREADY_STARTED", "Turn timers are locked after the game starts");
+    requireRoom(room.hostId === playerId, "HOST_ONLY", "Only the host can configure turn timers");
+    requireRoom(Object.values(settings).every((seconds) => Number.isSafeInteger(seconds) && seconds >= 15 && seconds <= 600), "INVALID_TIMER_SETTINGS", "Every turn timer must be between 15 and 600 seconds");
+    room.timerSettings = { ...settings };
     this.persist();
   }
 
@@ -207,6 +258,9 @@ export class RoomManager {
       ports: createVariablePortPlacements(layout.topology, seed),
     });
     room.status = "playing";
+    room.gameEvents = [];
+    room.endedReason = null;
+    this.refreshDeadline(room, true);
     this.persist();
     return room.game;
   }
@@ -228,7 +282,7 @@ export class RoomManager {
 
   offerDomesticTrade(roomCode: string, playerId: string, input: {
     readonly expectedVersion: number;
-    readonly partnerId: string;
+    readonly partnerId?: string;
     readonly actorGives: ResourceBundle;
     readonly partnerGives: ResourceBundle;
   }): DomesticTradeOffer {
@@ -236,25 +290,23 @@ export class RoomManager {
     requireRoom(room.status === "playing" && room.game, "GAME_NOT_ACTIVE", "This room does not have an active game");
     const game = room.game;
     requireRoom(game.version === input.expectedVersion, "STALE_VERSION", "The game changed before this offer was created");
-    requireRoom(game.phase.kind === "player1-actions", "WRONG_PHASE", "Domestic trades are available only during Player 1 actions");
-    const activeId = playerIdAtSeat(game, game.player1Seat);
-    requireRoom(activeId === playerId, "NOT_YOUR_TURN", "Only the active Player 1 can propose a domestic trade");
+    requireRoom(game.phase.kind === "player1-actions" || game.phase.kind === "player2-actions", "WRONG_PHASE", "Domestic trades are available during either active player's actions");
+    const activeId = activePlayerId(game);
+    requireRoom(activeId === playerId, "NOT_YOUR_TURN", "Only the active player can propose a domestic trade");
     const actor = game.players.get(playerId);
-    const partner = game.players.get(input.partnerId);
-    requireRoom(actor && partner, "UNKNOWN_PLAYER", "The selected trade partner is unavailable");
+    requireRoom(actor, "UNKNOWN_PLAYER", "The active player is unavailable");
+    if (input.partnerId) requireRoom(game.players.has(input.partnerId), "UNKNOWN_PLAYER", "The selected trade partner is unavailable");
     this.validateProposal(input.actorGives, input.partnerGives);
     requireRoom(containsResources(actor.hand, input.actorGives), "INSUFFICIENT_RESOURCES", "You no longer have the resources offered");
-    requireRoom(room.tradeOffers.size < 10, "TOO_MANY_OFFERS", "Resolve an existing offer before creating another");
-    for (const [offerId, offer] of room.tradeOffers) {
-      if (offer.actorId === playerId) room.tradeOffers.delete(offerId);
-    }
+    room.tradeOffers.clear();
     const offer: DomesticTradeOffer = {
       id: this.createId(),
       actorId: playerId,
-      partnerId: input.partnerId,
+      ...(input.partnerId ? { partnerId: input.partnerId } : {}),
       proposedById: playerId,
       actorGives: input.actorGives,
       partnerGives: input.partnerGives,
+      responses: new Map(),
       gameVersion: game.version,
       createdAt: this.now(),
     };
@@ -274,23 +326,20 @@ export class RoomManager {
     const existing = room.tradeOffers.get(input.offerId);
     requireRoom(existing, "OFFER_NOT_FOUND", "This trade offer is no longer available");
     requireRoom(existing.gameVersion === input.expectedVersion && room.game.version === input.expectedVersion, "OFFER_STALE", "The game changed after this offer was made");
-    const recipientId = existing.proposedById === existing.actorId ? existing.partnerId : existing.actorId;
-    requireRoom(playerId === recipientId, "NOT_TRADE_RECIPIENT", "Only the recipient can counter this offer");
+    requireRoom(playerId !== existing.actorId, "TRADE_PUBLISHER_CANNOT_RESPOND", "The player who published the offer cannot counter it");
+    requireRoom(room.game.players.has(playerId), "UNKNOWN_PLAYER", "This player is unavailable");
+    if (existing.partnerId) requireRoom(playerId === existing.partnerId, "NOT_TRADE_RECIPIENT", "Only the recipient can counter this offer");
     this.validateProposal(input.actorGives, input.partnerGives);
-    const promised = playerId === existing.actorId ? input.actorGives : input.partnerGives;
-    requireRoom(containsResources(room.game.players.get(playerId)!.hand, promised), "INSUFFICIENT_RESOURCES", "You no longer have the resources offered");
-    const counter: DomesticTradeOffer = {
-      ...existing,
-      id: this.createId(),
-      proposedById: playerId,
+    requireRoom(containsResources(room.game.players.get(playerId)!.hand, input.partnerGives), "INSUFFICIENT_RESOURCES", "You no longer have the resources offered");
+    existing.responses.set(playerId, {
+      playerId,
+      status: "countered",
       actorGives: input.actorGives,
       partnerGives: input.partnerGives,
-      createdAt: this.now(),
-    };
-    room.tradeOffers.delete(existing.id);
-    room.tradeOffers.set(counter.id, counter);
+      updatedAt: this.now(),
+    });
     this.persist();
-    return counter;
+    return existing.partnerId ? { ...existing, proposedById: playerId } : existing;
   }
 
   acceptDomesticTrade(roomCode: string, playerId: string, offerId: string, commandId: string): GameCommandResult {
@@ -298,8 +347,11 @@ export class RoomManager {
     requireRoom(room.status === "playing" && room.game, "GAME_NOT_ACTIVE", "This room does not have an active game");
     const offer = room.tradeOffers.get(offerId);
     requireRoom(offer, "OFFER_NOT_FOUND", "This trade offer is no longer available");
-    const recipientId = offer.proposedById === offer.actorId ? offer.partnerId : offer.actorId;
-    requireRoom(recipientId === playerId, "NOT_TRADE_RECIPIENT", "Only the recipient can accept this offer");
+    requireRoom(offer.partnerId, "OPEN_TRADE_REQUIRES_SELECTION", "Open-trade responses must be selected by the publisher");
+    if (playerId === offer.actorId) {
+      return this.selectDomesticTrade(roomCode, playerId, offerId, offer.partnerId, commandId);
+    }
+    requireRoom(offer.partnerId === playerId, "NOT_TRADE_RECIPIENT", "Only the recipient can accept this offer");
     requireRoom(offer.gameVersion === room.game.version, "OFFER_STALE", "The game changed after this offer was made");
     return this.executeGameCommand(room, offer.actorId, {
       commandId,
@@ -313,13 +365,68 @@ export class RoomManager {
     });
   }
 
+  acceptDomesticTradeResponse(roomCode: string, playerId: string, offerId: string): void {
+    const room = this.getRoom(roomCode);
+    requireRoom(room.status === "playing" && room.game, "GAME_NOT_ACTIVE", "This room does not have an active game");
+    const offer = room.tradeOffers.get(offerId);
+    requireRoom(offer, "OFFER_NOT_FOUND", "This trade offer is no longer available");
+    requireRoom(offer.gameVersion === room.game.version, "OFFER_STALE", "The game changed after this offer was made");
+    requireRoom(playerId !== offer.actorId, "TRADE_PUBLISHER_CANNOT_RESPOND", "The player who published the offer cannot accept it");
+    const responder = room.game.players.get(playerId);
+    requireRoom(responder, "UNKNOWN_PLAYER", "This player is unavailable");
+    requireRoom(containsResources(responder.hand, offer.partnerGives), "INSUFFICIENT_RESOURCES", "You no longer have the requested resources");
+    offer.responses.set(playerId, { playerId, status: "accepted", updatedAt: this.now() });
+    this.persist();
+  }
+
+  selectDomesticTrade(roomCode: string, playerId: string, offerId: string, partnerId: string, commandId: string): GameCommandResult {
+    const room = this.getRoom(roomCode);
+    requireRoom(room.status === "playing" && room.game, "GAME_NOT_ACTIVE", "This room does not have an active game");
+    const offer = room.tradeOffers.get(offerId);
+    requireRoom(offer, "OFFER_NOT_FOUND", "This trade offer is no longer available");
+    requireRoom(offer.actorId === playerId, "NOT_TRADE_PUBLISHER", "Only the player who published this offer can choose a response");
+    requireRoom(offer.gameVersion === room.game.version, "OFFER_STALE", "The game changed after this offer was made");
+    const response = offer.responses.get(partnerId);
+    requireRoom(response && response.status !== "declined", "TRADE_RESPONSE_UNAVAILABLE", "This player has not offered an available trade");
+    const actorGives = response.status === "countered" ? response.actorGives! : offer.actorGives;
+    const partnerGives = response.status === "countered" ? response.partnerGives! : offer.partnerGives;
+    return this.executeGameCommand(room, offer.actorId, {
+      commandId,
+      expectedVersion: offer.gameVersion,
+      command: { type: "DOMESTIC_TRADE", partnerId, actorGives, partnerGives },
+    });
+  }
+
+  expireTurns(): readonly GameCommandResult[] {
+    const results: GameCommandResult[] = [];
+    const now = this.now();
+    for (const room of this.rooms.values()) {
+      if (room.status !== "playing" || !room.game || room.turnDeadlineAt === null) continue;
+      if (room.turnDeadlineAt > now && !this.offlineAutoCommandDue(room)) continue;
+      for (let guard = 0; guard < 4 && room.turnDeadlineAt !== null && (room.turnDeadlineAt <= now || this.offlineAutoCommandDue(room)); guard += 1) {
+        const timedCommand = this.commandForExpiredTurn(room.game);
+        if (!timedCommand) {
+          this.refreshDeadline(room, true);
+          break;
+        }
+        results.push(this.executeGameCommand(room, timedCommand.playerId, {
+          commandId: `timeout-${now}-${room.game.version}`,
+          expectedVersion: room.game.version,
+          command: timedCommand.command,
+        }));
+      }
+    }
+    return results;
+  }
+
   rejectDomesticTrade(roomCode: string, playerId: string, offerId: string): void {
     const room = this.getRoom(roomCode);
     const offer = room.tradeOffers.get(offerId);
     requireRoom(offer, "OFFER_NOT_FOUND", "This trade offer is no longer available");
-    const recipientId = offer.proposedById === offer.actorId ? offer.partnerId : offer.actorId;
-    requireRoom(recipientId === playerId, "NOT_TRADE_RECIPIENT", "Only the recipient can reject this offer");
-    room.tradeOffers.delete(offerId);
+    requireRoom(room.status === "playing" && room.game && offer.gameVersion === room.game.version, "OFFER_STALE", "The game changed after this offer was made");
+    requireRoom(playerId !== offer.actorId, "TRADE_PUBLISHER_CANNOT_RESPOND", "The player who published the offer cannot decline it");
+    requireRoom(room.game.players.has(playerId), "UNKNOWN_PLAYER", "This player is unavailable");
+    offer.responses.set(playerId, { playerId, status: "declined", updatedAt: this.now() });
     this.persist();
   }
 
@@ -327,7 +434,7 @@ export class RoomManager {
     const room = this.getRoom(roomCode);
     const offer = room.tradeOffers.get(offerId);
     requireRoom(offer, "OFFER_NOT_FOUND", "This trade offer is no longer available");
-    requireRoom(offer.proposedById === playerId, "NOT_TRADE_PROPOSER", "Only the proposing player can cancel this offer");
+    requireRoom(offer.actorId === playerId, "NOT_TRADE_PROPOSER", "Only the player who published the offer can cancel it");
     room.tradeOffers.delete(offerId);
     this.persist();
   }
@@ -349,10 +456,30 @@ export class RoomManager {
     });
     if (!result.accepted) throw new RoomError(result.code, result.detail ?? "The game command was rejected");
     room.game = result.state;
+    room.gameEvents.push(...result.events);
+    for (const event of result.events) {
+      if (event.type === "DICE_ROLLED") {
+        this.globalDiceRolls.set(event.total, (this.globalDiceRolls.get(event.total) ?? 0) + 1);
+      }
+    }
     room.tradeOffers.clear();
     if (room.game.phase.kind === "game-over") room.status = "finished";
+    this.refreshDeadline(room);
     this.persist();
     return { roomCode: room.code, state: room.game, events: result.events };
+  }
+
+  endGameForOfflinePlayers(roomCode: string, playerId: string): void {
+    const room = this.getRoom(roomCode);
+    requireRoom(room.status === "playing", "GAME_NOT_ACTIVE", "This room does not have an active game");
+    requireRoom(room.hostId === playerId, "HOST_ONLY", "Only the host can end the game");
+    const offlineCount = [...room.members.values()].filter((member) => member.connectionIds.size === 0).length;
+    requireRoom(offlineCount > 2, "NOT_ENOUGH_OFFLINE", "At least three players must be offline before ending the game");
+    room.status = "finished";
+    room.endedReason = "host-ended-offline";
+    room.tradeOffers.clear();
+    this.refreshDeadline(room, true);
+    this.persist();
   }
 
   leaveRoom(roomCode: string, playerId: string): boolean {
@@ -393,8 +520,12 @@ export class RoomManager {
       for (const member of room.members.values()) {
         if (member.connectionIds.delete(connectionId)) changed = true;
       }
-      if (changed) affected.push(room.code);
+      if (changed) {
+        this.ensureConnectedHost(room);
+        affected.push(room.code);
+      }
     }
+    if (affected.length > 0) this.persist();
     return affected;
   }
 
@@ -417,7 +548,22 @@ export class RoomManager {
           isReady: member.isReady,
           isConnected: member.connectionIds.size > 0,
         })),
-      tradeOffers: [...room.tradeOffers.values()].map((offer) => ({ ...offer })),
+      tradeOffers: [...room.tradeOffers.values()].map((offer) => ({
+        id: offer.id,
+        actorId: offer.actorId,
+        actorGives: offer.actorGives,
+        partnerGives: offer.partnerGives,
+        responses: [...offer.responses.values()]
+          .filter((response) => viewerId === offer.actorId || response.playerId === viewerId)
+          .map((response) => ({ ...response })),
+        gameVersion: offer.gameVersion,
+        createdAt: offer.createdAt,
+      })),
+      timerSettings: room.timerSettings,
+      turnDeadlineAt: room.turnDeadlineAt,
+      activity: projectEventsForViewer(room.gameEvents, viewerId),
+      endedReason: room.endedReason,
+      diceStatistics: this.diceStatisticsView(),
       game: room.game ? projectGameForViewer(room.game, viewerId) : null,
     };
   }
@@ -476,8 +622,26 @@ export class RoomManager {
       members,
       status: stored.status,
       game: stored.game ? deserializeGameState(stored.game) : null,
-      tradeOffers: new Map(stored.tradeOffers.map((offer) => [offer.id, { ...offer }])),
+      tradeOffers: new Map(stored.tradeOffers
+        .filter((offer) => Array.isArray(offer.responses))
+        .map((offer) => [offer.id, {
+          id: offer.id,
+          actorId: offer.actorId,
+          proposedById: offer.actorId,
+          actorGives: offer.actorGives,
+          partnerGives: offer.partnerGives,
+          responses: new Map((offer.responses ?? []).map((response) => [response.playerId, { ...response }])),
+          gameVersion: offer.gameVersion,
+          createdAt: offer.createdAt,
+        }])),
+      timerSettings: stored.timerSettings ?? DEFAULT_TURN_TIMER_SETTINGS,
+      gameEvents: [...(stored.gameEvents ?? [])],
+      endedReason: stored.endedReason ?? null,
+      turnDeadlineAt: stored.turnDeadlineAt ?? null,
+      deadlineKey: stored.deadlineKey ?? null,
     });
+    const room = this.rooms.get(normalizeCode(stored.code));
+    if (room?.status === "playing") this.refreshDeadline(room, room.turnDeadlineAt === null);
   }
 
   private persist(): void {
@@ -496,15 +660,186 @@ export class RoomManager {
       })),
       status: room.status,
       game: room.game ? serializeGameState(room.game) : null,
-      tradeOffers: [...room.tradeOffers.values()].map((offer) => ({ ...offer })),
+      tradeOffers: [...room.tradeOffers.values()].map((offer) => ({
+        id: offer.id,
+        actorId: offer.actorId,
+        actorGives: offer.actorGives,
+        partnerGives: offer.partnerGives,
+        responses: [...offer.responses.values()].map((response) => ({ ...response })),
+        gameVersion: offer.gameVersion,
+        createdAt: offer.createdAt,
+      })),
+      timerSettings: room.timerSettings,
+      gameEvents: room.gameEvents,
+      endedReason: room.endedReason,
+      turnDeadlineAt: room.turnDeadlineAt,
+      deadlineKey: room.deadlineKey,
     }));
-    this.persistence.save(rooms);
+    this.persistence.save(rooms, Object.fromEntries(this.globalDiceRolls));
+  }
+
+  private diceStatisticsView(): DiceStatisticsView {
+    const totalRolls = [...this.globalDiceRolls.values()].reduce((sum, count) => sum + count, 0);
+    return {
+      totalRolls,
+      outcomes: [...this.globalDiceRolls.entries()].map(([total, count]) => ({
+        total,
+        count,
+        percentage: totalRolls === 0 ? 0 : count / totalRolls * 100,
+      })),
+    };
   }
 
   private getRoom(code: string): RoomRecord {
     const room = this.rooms.get(normalizeCode(code));
     if (!room) throw new RoomError("ROOM_NOT_FOUND", "No room exists for that invite code");
     return room;
+  }
+
+  private deadlineKeyFor(state: GameState): string | null {
+    const phase = state.phase;
+    if (phase.kind === "game-over") return null;
+    if (phase.kind === "setup") return `setup:${phase.round}:${phase.seat}`;
+    if (phase.kind === "discarding") {
+      const playerId = Object.keys(phase.requiredByPlayer).find((id) => !phase.submittedPlayerIds.includes(id));
+      return playerId ? `discard:${state.pairedTurn}:${playerId}` : null;
+    }
+    const playerId = activePlayerId(state);
+    return playerId ? `turn:${state.pairedTurn}:${phase.kind}:${playerId}` : null;
+  }
+
+  private refreshDeadline(room: RoomRecord, force = false): void {
+    if (!room.game || room.status !== "playing") {
+      room.deadlineKey = null;
+      room.turnDeadlineAt = null;
+      return;
+    }
+    const key = this.deadlineKeyFor(room.game);
+    if (key === null) {
+      room.deadlineKey = null;
+      room.turnDeadlineAt = null;
+      return;
+    }
+    if (!force && key === room.deadlineKey && room.turnDeadlineAt !== null) return;
+    room.deadlineKey = key;
+    room.turnDeadlineAt = this.now() + this.deadlineSeconds(room.game, room.timerSettings) * 1_000;
+  }
+
+  private deadlineSeconds(state: GameState, settings: TurnTimerSettings): number {
+    const phase = state.phase;
+    if (phase.kind === "setup") return settings.setupSeconds;
+    if (phase.kind === "player1-pre-roll") return settings.rollSeconds;
+    if (phase.kind === "discarding") return settings.discardSeconds;
+    if (phase.kind === "robber-move" || phase.kind === "robber-steal") return settings.robberSeconds;
+    return settings.actionSeconds;
+  }
+
+  private offlineAutoCommandDue(room: RoomRecord): boolean {
+    if (!room.game || (room.game.phase.kind !== "player1-pre-roll" && room.game.phase.kind !== "player1-actions" && room.game.phase.kind !== "player2-actions")) return false;
+    const playerId = activePlayerId(room.game);
+    return Boolean(playerId && room.members.get(playerId)?.connectionIds.size === 0);
+  }
+
+  private ensureConnectedHost(room: RoomRecord): void {
+    const host = room.members.get(room.hostId);
+    if (host && host.connectionIds.size > 0) return;
+    const connected = [...room.members.values()].filter((member) => member.connectionIds.size > 0);
+    if (connected.length === 0) return;
+    const hostSeat = host?.seat ?? -1;
+    const seatSpan = Math.max(...[...room.members.values()].map((member) => member.seat)) + 1;
+    connected.sort((left, right) => {
+      const leftDistance = (left.seat - hostSeat + seatSpan) % seatSpan;
+      const rightDistance = (right.seat - hostSeat + seatSpan) % seatSpan;
+      return leftDistance - rightDistance;
+    });
+    room.hostId = connected[0]!.id;
+  }
+
+  private commandForExpiredTurn(state: GameState): { readonly playerId: PlayerId; readonly command: GameCommand } | null {
+    const phase = state.phase;
+    if (phase.kind === "setup") {
+      const playerId = activePlayerId(state);
+      if (!playerId) return null;
+      const player = state.players.get(playerId);
+      if (!player) return null;
+      if (phase.step === "settlement") {
+        const vertexId = state.layout.topology.vertexIds.find((candidate) => checkSettlementPlacement(
+          state.layout.topology,
+          state.occupancy,
+          playerId,
+          candidate,
+          { setup: true, pieces: player.pieces },
+        ).legal);
+        return vertexId ? { playerId, command: { type: "PLACE_INITIAL_SETTLEMENT", vertexId } } : null;
+      }
+      if (!phase.pendingSettlementVertexId) return null;
+      const pendingSettlementVertexId = phase.pendingSettlementVertexId;
+      const edgeId = state.layout.topology.edgeIds.find((candidate) => checkRoadPlacement(
+        state.layout.topology,
+        state.occupancy,
+        playerId,
+        candidate,
+        { pieces: player.pieces, setupSettlementVertexId: pendingSettlementVertexId },
+      ).legal);
+      return edgeId ? { playerId, command: { type: "PLACE_INITIAL_ROAD", edgeId } } : null;
+    }
+    if (phase.kind === "discarding") {
+      const playerId = Object.keys(phase.requiredByPlayer).find((id) => !phase.submittedPlayerIds.includes(id));
+      if (!playerId) return null;
+      const required = phase.requiredByPlayer[playerId] ?? 0;
+      const hand = state.players.get(playerId)?.hand;
+      if (!hand) return null;
+      const resources = { ...createResourceBundle() } as Record<ResourceType, number>;
+      let remaining = required;
+      for (const resource of RESOURCE_TYPES) {
+        const amount = Math.min(hand[resource], remaining);
+        resources[resource] = amount;
+        remaining -= amount;
+      }
+      return { playerId, command: { type: "SUBMIT_DISCARD", resources } };
+    }
+    const playerId = activePlayerId(state);
+    if (!playerId) return null;
+    if (phase.kind === "player1-pre-roll") return { playerId, command: { type: "ROLL_DICE" } };
+    if (phase.kind === "player1-actions" || phase.kind === "player2-actions") return { playerId, command: { type: "END_SUBTURN" } };
+    if (phase.kind === "robber-move") {
+      const hexId = state.layout.topology.hexIds.find((id) => id !== state.layout.robberHexId);
+      return hexId ? { playerId, command: { type: "MOVE_ROBBER", hexId } } : null;
+    }
+    if (phase.kind === "robber-steal") {
+      const targetPlayerId = phase.eligibleTargetIds[0];
+      return targetPlayerId ? { playerId, command: { type: "STEAL_FROM_PLAYER", targetPlayerId } } : null;
+    }
+    if (phase.kind === "road-building") {
+      const player = state.players.get(playerId);
+      const edgeId = player && state.layout.topology.edgeIds.find((candidate) => checkRoadPlacement(
+        state.layout.topology,
+        state.occupancy,
+        playerId,
+        candidate,
+        { pieces: player.pieces },
+      ).legal);
+      return edgeId ? { playerId, command: { type: "PLACE_FREE_ROAD", edgeId } } : null;
+    }
+    if (phase.kind === "year-of-plenty") {
+      const resources = { ...createResourceBundle() } as Record<ResourceType, number>;
+      let remaining = phase.requiredCards;
+      for (const resource of RESOURCE_TYPES) {
+        const amount = Math.min(state.bank[resource], remaining);
+        resources[resource] = amount;
+        remaining -= amount;
+      }
+      return { playerId, command: { type: "TAKE_YEAR_OF_PLENTY", resources } };
+    }
+    if (phase.kind === "monopoly") {
+      const resource = RESOURCE_TYPES.reduce((best, candidate) => {
+        const count = [...state.players.values()].reduce((total, player) => total + (player.id === playerId ? 0 : player.hand[candidate]), 0);
+        const bestCount = [...state.players.values()].reduce((total, player) => total + (player.id === playerId ? 0 : player.hand[best]), 0);
+        return count > bestCount ? candidate : best;
+      }, RESOURCE_TYPES[0] as ResourceType);
+      return { playerId, command: { type: "CHOOSE_MONOPOLY_RESOURCE", resource } };
+    }
+    return null;
   }
 
   private getMember(room: RoomRecord, playerId: string): RoomMember {

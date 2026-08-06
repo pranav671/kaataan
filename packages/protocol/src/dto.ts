@@ -12,6 +12,14 @@ import type { PlayerColor } from "./schema.ts";
 
 export type RoomStatus = "lobby" | "playing" | "finished";
 
+export interface TurnTimerSettings {
+  readonly setupSeconds: number;
+  readonly rollSeconds: number;
+  readonly actionSeconds: number;
+  readonly robberSeconds: number;
+  readonly discardSeconds: number;
+}
+
 export interface RoomMemberView {
   readonly id: string;
   readonly name: string;
@@ -29,18 +37,39 @@ export interface RoomSnapshot {
   readonly viewerId: string;
   readonly members: readonly RoomMemberView[];
   readonly tradeOffers: readonly DomesticTradeOfferView[];
+  readonly timerSettings: TurnTimerSettings;
+  readonly turnDeadlineAt: number | null;
+  readonly activity: readonly ProjectedGameEvent[];
+  readonly endedReason: "host-ended-offline" | null;
+  readonly diceStatistics: DiceStatisticsView;
   readonly game: GameSnapshot | null;
+}
+
+export interface DiceStatisticsView {
+  readonly totalRolls: number;
+  readonly outcomes: readonly {
+    readonly total: number;
+    readonly count: number;
+    readonly percentage: number;
+  }[];
 }
 
 export interface DomesticTradeOfferView {
   readonly id: string;
   readonly actorId: string;
-  readonly partnerId: string;
-  readonly proposedById: string;
   readonly actorGives: ResourceBundle;
   readonly partnerGives: ResourceBundle;
+  readonly responses: readonly DomesticTradeResponseView[];
   readonly gameVersion: number;
   readonly createdAt: number;
+}
+
+export interface DomesticTradeResponseView {
+  readonly playerId: string;
+  readonly status: "accepted" | "declined" | "countered";
+  readonly actorGives?: ResourceBundle;
+  readonly partnerGives?: ResourceBundle;
+  readonly updatedAt: number;
 }
 
 export interface PlayerSessionCredentials {
@@ -80,7 +109,9 @@ export interface PlayerGameView {
   readonly resourceCardCount: number;
   readonly developmentCardCount: number;
   readonly publicScore: number;
+  readonly victoryPointCardCount?: number | null;
   readonly playedKnights: number;
+  readonly playedDevelopmentCardCount?: number;
   readonly playerTurnSequence: number;
   readonly developmentCardPlayedThisTurn: boolean;
   readonly hand: ResourceBundle | null;

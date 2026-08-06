@@ -51,6 +51,7 @@ export type GameEvent =
   | (EventBase & {
     readonly type: "DICE_ROLLED";
     readonly playerId: PlayerId;
+    readonly dice: readonly [number, number];
     readonly total: number;
   })
   | (EventBase & {

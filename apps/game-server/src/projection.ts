@@ -69,6 +69,7 @@ export function projectGameForViewer(state: GameState, viewerId: PlayerId): Game
       const player = state.players.get(playerId);
       if (!player) throw new Error(`Missing player ${playerId}`);
       const ownView = playerId === viewerId;
+      const score = playerScore(state, playerId);
       return {
         id: player.id,
         name: player.name,
@@ -76,8 +77,12 @@ export function projectGameForViewer(state: GameState, viewerId: PlayerId): Game
         pieces: player.pieces,
         resourceCardCount: totalResources(player.hand),
         developmentCardCount: player.developmentCards.length,
-        publicScore: playerScore(state, playerId).publicScore,
+        publicScore: score.publicScore,
+        victoryPointCardCount: ownView || state.phase.kind === "game-over"
+          ? score.revealedVictoryPoints + score.hiddenVictoryPoints
+          : null,
         playedKnights: player.playedKnights,
+        playedDevelopmentCardCount: state.resolvedDevelopmentCards.filter((card) => card.playerId === playerId).length,
         playerTurnSequence: player.playerTurnSequence,
         developmentCardPlayedThisTurn: player.developmentCardPlayedThisTurn,
         hand: ownView ? player.hand : null,
@@ -119,7 +124,14 @@ export function projectEventForViewer(
     return projectRobberEventForViewer(event, viewerId) as ProjectedGameEvent;
   }
   if (event.type === "RESOURCE_STOLEN") {
-    return projectRobberEventForViewer(event, viewerId) as ProjectedGameEvent;
+    return {
+      sequence: event.sequence,
+      type: event.type,
+      playerId: event.playerId,
+      targetPlayerId: event.targetPlayerId,
+      count: event.resource === null ? 0 : 1,
+      resource: event.resource,
+    };
   }
   if (event.type === "VICTORY_POINT_CARDS_REVEALED"
     || event.type === "LONGEST_ROAD_HOLDER_CHANGED"
@@ -141,6 +153,7 @@ export function projectEventForViewer(
       sequence: event.sequence,
       type: event.type,
       counts: Object.fromEntries(Object.entries(event.payouts).map(([id, bundle]) => [id, resourceCount(bundle)])),
+      payouts: event.payouts,
       privatePayout: event.payouts[viewerId] ?? null,
     };
   }
@@ -176,7 +189,7 @@ export function projectEventForViewer(
     return { sequence: event.sequence, type: event.type, playerId: event.playerId, edgeId: event.edgeId };
   }
   if (event.type === "DICE_ROLLED") {
-    return { sequence: event.sequence, type: event.type, playerId: event.playerId, total: event.total };
+    return { sequence: event.sequence, type: event.type, playerId: event.playerId, dice: event.dice, total: event.total };
   }
   if (event.type === "PLAYER_TURN_STARTED") {
     return { sequence: event.sequence, type: event.type, playerId: event.playerId };

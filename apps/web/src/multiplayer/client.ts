@@ -4,6 +4,7 @@ import type {
   PlayerSessionCredentials,
   ProjectedGameEvent,
   RoomSnapshot,
+  TurnTimerSettings,
   ServerMessage,
 } from "@kaataan/protocol";
 import type { GameCommand, ResourceBundle } from "@kaataan/game-engine";
@@ -96,7 +97,9 @@ export class MultiplayerClient {
   }
 
   setReady(ready: boolean): void { this.send({ type: "room.set_ready", requestId: this.id("ready"), ready }); }
+  updateTimerSettings(settings: TurnTimerSettings): void { this.send({ type: "room.update_timer_settings", requestId: this.id("timers"), settings }); }
   startGame(): void { this.send({ type: "room.start", requestId: this.id("start") }); }
+  endGame(): void { this.send({ type: "room.end_game", requestId: this.id("end-game") }); }
   kickPlayer(playerId: string): void { this.send({ type: "room.kick", requestId: this.id("kick"), playerId }); }
 
   gameCommand(expectedVersion: number, command: GameCommand): void {
@@ -104,8 +107,8 @@ export class MultiplayerClient {
     this.send({ type: "game.command", commandId: this.id("command"), expectedVersion, command: wireCommand });
   }
 
-  offerTrade(expectedVersion: number, partnerId: string, actorGives: ResourceBundle, partnerGives: ResourceBundle): void {
-    this.send({ type: "trade.offer", requestId: this.id("offer"), expectedVersion, partnerId, actorGives, partnerGives });
+  offerTrade(expectedVersion: number, actorGives: ResourceBundle, partnerGives: ResourceBundle): void {
+    this.send({ type: "trade.offer", requestId: this.id("offer"), expectedVersion, actorGives, partnerGives });
   }
 
   counterTrade(expectedVersion: number, offerId: string, actorGives: ResourceBundle, partnerGives: ResourceBundle): void {
@@ -114,6 +117,10 @@ export class MultiplayerClient {
 
   respondToTrade(action: "accept" | "reject" | "cancel", offerId: string): void {
     this.send({ type: `trade.${action}`, requestId: this.id(`trade-${action}`), offerId } as ClientMessage);
+  }
+
+  selectTradeResponse(offerId: string, playerId: string): void {
+    this.send({ type: "trade.select", requestId: this.id("trade-select"), offerId, playerId });
   }
 
   leave(): void {

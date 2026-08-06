@@ -32,6 +32,7 @@ export interface CreateServerOptions {
   readonly heartbeatIntervalMs?: number;
   readonly maxMessagesPerWindow?: number;
   readonly rateWindowMs?: number;
+  readonly turnTimerIntervalMs?: number;
 }
 
 function send(socket: WebSocket, message: ServerMessage): void {
@@ -96,6 +97,22 @@ export function createKaataanServer(options: CreateServerOptions = {}): KaataanS
       } catch {
         socketSessions.delete(socket);
       }
+    }
+  }
+
+  function broadcastGlobalStatistics(exceptRoomCode: string): void {
+    const refreshed = new Set<string>();
+    for (const session of socketSessions.values()) {
+      if (session.roomCode === exceptRoomCode || refreshed.has(session.roomCode)) continue;
+      refreshed.add(session.roomCode);
+      broadcastRoom(session.roomCode);
+    }
+  }
+
+  function broadcastGameResult(result: { readonly roomCode: string; readonly events: readonly GameEvent[] }): void {
+    broadcastRoom(result.roomCode, result.events);
+    if (result.events.some((event) => event.type === "DICE_ROLLED")) {
+      broadcastGlobalStatistics(result.roomCode);
     }
   }
 
@@ -165,6 +182,11 @@ export function createKaataanServer(options: CreateServerOptions = {}): KaataanS
           broadcastRoom(session.roomCode);
           return;
         }
+        if (message.type === "room.update_timer_settings") {
+          rooms.updateTimerSettings(session.roomCode, session.playerId, message.settings);
+          broadcastRoom(session.roomCode);
+          return;
+        }
         if (message.type === "room.start") {
           rooms.startGame(session.roomCode, session.playerId);
           broadcastRoom(session.roomCode);
@@ -175,6 +197,11 @@ export function createKaataanServer(options: CreateServerOptions = {}): KaataanS
           const deleted = rooms.leaveRoom(roomCode, session.playerId);
           socketSessions.delete(socket);
           if (!deleted) broadcastRoom(roomCode);
+          return;
+        }
+        if (message.type === "room.end_game") {
+          rooms.endGameForOfflinePlayers(session.roomCode, session.playerId);
+          broadcastRoom(session.roomCode);
           return;
         }
         if (message.type === "room.kick") {
@@ -193,13 +220,8 @@ export function createKaataanServer(options: CreateServerOptions = {}): KaataanS
           return;
         }
         if (message.type === "trade.accept") {
-          const result = rooms.acceptDomesticTrade(
-            session.roomCode,
-            session.playerId,
-            message.offerId,
-            message.requestId,
-          );
-          broadcastRoom(result.roomCode, result.events);
+          rooms.acceptDomesticTradeResponse(session.roomCode, session.playerId, message.offerId);
+          broadcastRoom(session.roomCode);
           return;
         }
         if (message.type === "trade.counter") {
@@ -210,6 +232,17 @@ export function createKaataanServer(options: CreateServerOptions = {}): KaataanS
         if (message.type === "trade.reject") {
           rooms.rejectDomesticTrade(session.roomCode, session.playerId, message.offerId);
           broadcastRoom(session.roomCode);
+          return;
+        }
+        if (message.type === "trade.select") {
+          const result = rooms.selectDomesticTrade(
+            session.roomCode,
+            session.playerId,
+            message.offerId,
+            message.playerId,
+            message.requestId,
+          );
+          broadcastGameResult(result);
           return;
         }
         if (message.type === "trade.cancel") {
@@ -223,7 +256,7 @@ export function createKaataanServer(options: CreateServerOptions = {}): KaataanS
             expectedVersion: message.expectedVersion,
             command: message.command as GameCommand,
           });
-          broadcastRoom(result.roomCode, result.events);
+          broadcastGameResult(result);
         }
       } catch (error) {
         const requestId = requestIdOf(raw);
@@ -256,6 +289,10 @@ export function createKaataanServer(options: CreateServerOptions = {}): KaataanS
     }
   }, options.heartbeatIntervalMs ?? 30_000);
   heartbeat.unref();
+  const turnTimer = setInterval(() => {
+    for (const result of rooms.expireTurns()) broadcastGameResult(result);
+  }, options.turnTimerIntervalMs ?? 500);
+  turnTimer.unref();
 
   return {
     httpServer,
@@ -275,6 +312,7 @@ export function createKaataanServer(options: CreateServerOptions = {}): KaataanS
     },
     close() {
       clearInterval(heartbeat);
+      clearInterval(turnTimer);
       for (const socket of sockets.clients) socket.terminate();
       return new Promise((resolve, reject) => {
         sockets.close(() => httpServer.close((error) => error ? reject(error) : resolve()));

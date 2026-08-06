@@ -6,6 +6,7 @@ import type {
   EdgeId,
   EdgeTopology,
   GamePhase,
+  GameEvent,
   GameState,
   HexId,
   HexTile,
@@ -18,7 +19,7 @@ import type {
   VertexId,
   VertexTopology,
 } from "@kaataan/game-engine";
-import type { PlayerColor } from "@kaataan/protocol";
+import type { PlayerColor, TurnTimerSettings } from "@kaataan/protocol";
 
 export const PERSISTENCE_FORMAT_VERSION = 1;
 
@@ -34,12 +35,19 @@ export interface PersistedMember {
 export interface PersistedTradeOffer {
   readonly id: string;
   readonly actorId: string;
-  readonly partnerId: string;
-  readonly proposedById: string;
   readonly actorGives: ResourceBundle;
   readonly partnerGives: ResourceBundle;
+  readonly responses?: readonly PersistedTradeResponse[];
   readonly gameVersion: number;
   readonly createdAt: number;
+}
+
+export interface PersistedTradeResponse {
+  readonly playerId: string;
+  readonly status: "accepted" | "declined" | "countered";
+  readonly actorGives?: ResourceBundle;
+  readonly partnerGives?: ResourceBundle;
+  readonly updatedAt: number;
 }
 
 export interface PersistedGameState {
@@ -87,17 +95,24 @@ export interface PersistedRoom {
   readonly status: "lobby" | "playing" | "finished";
   readonly game: PersistedGameState | null;
   readonly tradeOffers: readonly PersistedTradeOffer[];
+  readonly timerSettings?: TurnTimerSettings;
+  readonly gameEvents?: readonly GameEvent[];
+  readonly endedReason?: "host-ended-offline" | null;
+  readonly turnDeadlineAt?: number | null;
+  readonly deadlineKey?: string | null;
 }
 
 interface PersistenceDocument {
   readonly formatVersion: typeof PERSISTENCE_FORMAT_VERSION;
   readonly savedAt: string;
   readonly rooms: readonly PersistedRoom[];
+  readonly globalDiceRolls?: Readonly<Record<string, number>>;
 }
 
 export interface RoomPersistence {
   load(): readonly PersistedRoom[];
-  save(rooms: readonly PersistedRoom[]): void;
+  loadDiceStatistics?(): Readonly<Record<string, number>>;
+  save(rooms: readonly PersistedRoom[], globalDiceRolls?: Readonly<Record<string, number>>): void;
 }
 
 export function serializeGameState(state: GameState): PersistedGameState {
@@ -174,10 +189,18 @@ export class JsonFileRoomPersistence implements RoomPersistence {
     return document.rooms;
   }
 
-  save(rooms: readonly PersistedRoom[]): void {
+  loadDiceStatistics(): Readonly<Record<string, number>> {
+    if (!existsSync(this.filePath)) return {};
+    const document = JSON.parse(readFileSync(this.filePath, "utf8")) as Partial<PersistenceDocument>;
+    return document.formatVersion === PERSISTENCE_FORMAT_VERSION && document.globalDiceRolls
+      ? document.globalDiceRolls
+      : {};
+  }
+
+  save(rooms: readonly PersistedRoom[], globalDiceRolls: Readonly<Record<string, number>> = {}): void {
     mkdirSync(dirname(this.filePath), { recursive: true });
     const temporaryPath = `${this.filePath}.${randomUUID()}.tmp`;
-    const document: PersistenceDocument = { formatVersion: PERSISTENCE_FORMAT_VERSION, savedAt: new Date().toISOString(), rooms };
+    const document: PersistenceDocument = { formatVersion: PERSISTENCE_FORMAT_VERSION, savedAt: new Date().toISOString(), rooms, globalDiceRolls };
     writeFileSync(temporaryPath, `${JSON.stringify(document)}\n`, { encoding: "utf8", mode: 0o600 });
     renameSync(temporaryPath, this.filePath);
     chmodSync(this.filePath, 0o600);

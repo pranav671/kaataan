@@ -51,6 +51,14 @@ const profileSchema = z.object({
   name: z.string().trim().min(2).max(24),
   color: playerColorSchema,
 }).strict();
+const timerSecondsSchema = z.number().int().min(15).max(600);
+export const turnTimerSettingsSchema = z.object({
+  setupSeconds: timerSecondsSchema,
+  rollSeconds: timerSecondsSchema,
+  actionSeconds: timerSecondsSchema,
+  robberSeconds: timerSecondsSchema,
+  discardSeconds: timerSecondsSchema,
+}).strict();
 
 export const clientMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("room.create"), requestId: requestIdSchema, profile: profileSchema }).strict(),
@@ -58,14 +66,15 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("session.resume"), requestId: requestIdSchema, roomCode: z.string().min(4).max(12), playerId: z.string().min(1), reconnectToken: z.string().min(16) }).strict(),
   z.object({ type: z.literal("room.update_profile"), requestId: requestIdSchema, profile: profileSchema }).strict(),
   z.object({ type: z.literal("room.set_ready"), requestId: requestIdSchema, ready: z.boolean() }).strict(),
+  z.object({ type: z.literal("room.update_timer_settings"), requestId: requestIdSchema, settings: turnTimerSettingsSchema }).strict(),
   z.object({ type: z.literal("room.start"), requestId: requestIdSchema }).strict(),
+  z.object({ type: z.literal("room.end_game"), requestId: requestIdSchema }).strict(),
   z.object({ type: z.literal("room.leave"), requestId: requestIdSchema }).strict(),
   z.object({ type: z.literal("room.kick"), requestId: requestIdSchema, playerId: z.string().min(1) }).strict(),
   z.object({
     type: z.literal("trade.offer"),
     requestId: requestIdSchema,
     expectedVersion: z.number().int().nonnegative(),
-    partnerId: z.string().min(1),
     actorGives: resourceBundleSchema,
     partnerGives: resourceBundleSchema,
   }).strict(),
@@ -79,6 +88,7 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
   }).strict(),
   z.object({ type: z.literal("trade.accept"), requestId: requestIdSchema, offerId: z.string().min(1) }).strict(),
   z.object({ type: z.literal("trade.reject"), requestId: requestIdSchema, offerId: z.string().min(1) }).strict(),
+  z.object({ type: z.literal("trade.select"), requestId: requestIdSchema, offerId: z.string().min(1), playerId: z.string().min(1) }).strict(),
   z.object({ type: z.literal("trade.cancel"), requestId: requestIdSchema, offerId: z.string().min(1) }).strict(),
   z.object({ type: z.literal("game.command"), commandId: requestIdSchema, expectedVersion: z.number().int().nonnegative(), command: gameCommandSchema }).strict(),
   z.object({ type: z.literal("ping"), timestamp: z.number() }).strict(),

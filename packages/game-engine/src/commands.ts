@@ -401,7 +401,7 @@ export function handleCommand(
     }
     const total = dice[0] + dice[1];
     const events: UnsequencedGameEvent[] = [
-      { type: "DICE_ROLLED", playerId: envelope.actorId, total },
+      { type: "DICE_ROLLED", playerId: envelope.actorId, dice, total },
     ];
     if (total === 7) {
       const requiredByPlayer = requiredDiscardsByPlayer(state);
@@ -835,9 +835,6 @@ export function handleCommand(
   }
 
   if (command.type === "DOMESTIC_TRADE") {
-    if (state.phase.kind !== "player1-actions" || playerOneId(state) !== envelope.actorId) {
-      return reject(state, "WRONG_PHASE");
-    }
     const partner = state.players.get(command.partnerId);
     if (!partner) return reject(state, "UNKNOWN_PLAYER");
     const validation = validateDomesticTrade({

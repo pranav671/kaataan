@@ -82,6 +82,23 @@ export function hydrateGameSnapshot(snapshot: GameSnapshot): GameState {
       type: card.type,
       purchasedPlayerTurn: card.purchasedPlayerTurn,
     }));
+    let buildingPoints = 0;
+    for (const building of snapshot.buildings) {
+      if (building.playerId === player.id) buildingPoints += building.kind === "city" ? 2 : 1;
+    }
+    const awardPoints = (snapshot.longestRoadHolderId === player.id ? 2 : 0)
+      + (snapshot.largestArmyHolderId === player.id ? 2 : 0);
+    const revealedPoints = Math.max(0, player.publicScore - buildingPoints - awardPoints);
+    if (player.developmentCards === null && player.victoryPointCardCount != null) {
+      const hiddenPoints = Math.max(0, player.victoryPointCardCount - revealedPoints);
+      for (let index = 0; index < hiddenPoints; index += 1) {
+        developmentCards.push({
+          id: `dev:${syntheticCardId++}`,
+          type: "victory-point",
+          purchasedPlayerTurn: player.playerTurnSequence,
+        });
+      }
+    }
     players.set(player.id, {
       id: player.id,
       name: player.name,
@@ -93,17 +110,18 @@ export function hydrateGameSnapshot(snapshot: GameSnapshot): GameState {
       playedKnights: player.playedKnights,
       developmentCardPlayedThisTurn: player.developmentCardPlayedThisTurn,
     });
-    let buildingPoints = 0;
-    for (const building of snapshot.buildings) {
-      if (building.playerId === player.id) buildingPoints += building.kind === "city" ? 2 : 1;
-    }
-    const awardPoints = (snapshot.longestRoadHolderId === player.id ? 2 : 0)
-      + (snapshot.largestArmyHolderId === player.id ? 2 : 0);
-    const revealedPoints = Math.max(0, player.publicScore - buildingPoints - awardPoints);
     for (let index = 0; index < revealedPoints; index += 1) {
       resolvedDevelopmentCards.push({
         id: `dev:${syntheticCardId++}`,
         type: "victory-point",
+        playerId: player.id,
+        playedPlayerTurn: player.playerTurnSequence,
+      });
+    }
+    for (let index = revealedPoints; index < (player.playedDevelopmentCardCount ?? revealedPoints); index += 1) {
+      resolvedDevelopmentCards.push({
+        id: `dev:${syntheticCardId++}`,
+        type: "knight",
         playerId: player.id,
         playedPlayerTurn: player.playerTurnSequence,
       });

@@ -129,7 +129,16 @@ export function SvgBoard({ state, targets, selectedId, onTarget, onInspect, colo
         <defs>
           <radialGradient id="water" cx="50%" cy="46%" r="70%"><stop offset="0" stopColor="#277d82" /><stop offset="1" stopColor="#0c4d58" /></radialGradient>
           <filter id="tile-shadow" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx="0" dy="5" stdDeviation="5" floodColor="#062d35" floodOpacity=".32" /></filter>
-          <filter id="target-glow" x="-100%" y="-100%" width="300%" height="300%"><feDropShadow dx="0" dy="0" stdDeviation="5" floodColor="#fff4b7" floodOpacity="1" /></filter>
+          <filter
+            id="target-glow"
+            filterUnits="userSpaceOnUse"
+            x={bounds.cx - bounds.width / 2}
+            y={bounds.cy - bounds.height / 2}
+            width={bounds.width}
+            height={bounds.height}
+          >
+            <feDropShadow dx="0" dy="0" stdDeviation="5" floodColor="#fff4b7" floodOpacity="1" />
+          </filter>
           <pattern id="water-lines" width="76" height="38" patternUnits="userSpaceOnUse"><path d="M-20 16 Q0 4 20 16T60 16T100 16" fill="none" stroke="#b7e4df" strokeOpacity=".11" strokeWidth="3" /></pattern>
         </defs>
         <rect data-board-water="true" x={view.x - 600} y={view.y - 600} width={view.width + 1200} height={view.height + 1200} fill="url(#water)" />

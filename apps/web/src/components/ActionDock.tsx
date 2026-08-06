@@ -15,10 +15,10 @@ interface ActionDockProps {
   readonly onBuyDevelopment: () => void;
 }
 
-const BUILDS: readonly { action: BoardAction; cost: keyof typeof BUILD_COSTS; label: string; icon: IconName }[] = [
-  { action: "road", cost: "road", label: "Road", icon: "road" },
-  { action: "settlement", cost: "settlement", label: "Settlement", icon: "home" },
-  { action: "city", cost: "city", label: "City", icon: "city" },
+const BUILDS: readonly { action: BoardAction; cost: keyof typeof BUILD_COSTS; supply: "roads" | "settlements" | "cities"; label: string; icon: IconName }[] = [
+  { action: "road", cost: "road", supply: "roads", label: "Road", icon: "road" },
+  { action: "settlement", cost: "settlement", supply: "settlements", label: "Settlement", icon: "home" },
+  { action: "city", cost: "city", supply: "cities", label: "City", icon: "city" },
 ];
 
 function Cost({ item }: { readonly item: keyof typeof BUILD_COSTS }) {
@@ -38,7 +38,10 @@ export function ActionDock({ state, actorId, disabled, selectedAction, onAction,
         <button type="button" className="primary-action roll-button" disabled={disabled} onClick={onRoll}><Icon name="dice" /><span><strong>{disabled ? "Waiting for roll" : "Roll dice"}</strong><small>{disabled ? "Another player is active" : "Begin your turn"}</small></span></button>
       ) : <>
         <div className="build-actions">
-          {BUILDS.map((build) => <button key={build.action} type="button" className={selectedAction === build.action ? "is-selected" : ""} disabled={disabled || !canAfford(state, actorId, build.cost)} onClick={() => onAction(selectedAction === build.action ? "inspect" : build.action)}><Icon name={build.icon} /><span><strong>{build.label}</strong><Cost item={build.cost} /></span></button>)}
+          {BUILDS.map((build) => {
+            const available = state.players.get(actorId)?.pieces[build.supply] ?? 0;
+            return <button key={build.action} type="button" className={selectedAction === build.action ? "is-selected" : ""} disabled={disabled || available === 0 || !canAfford(state, actorId, build.cost)} onClick={() => onAction(selectedAction === build.action ? "inspect" : build.action)}><Icon name={build.icon} /><span><strong>{build.label} <b className="piece-supply">{available} left</b></strong><Cost item={build.cost} /></span></button>;
+          })}
         </div>
         <span className="dock-divider" />
         <button type="button" className="secondary-action" disabled={disabled} onClick={onTrade}><Icon name="trade" /><span><strong>Trade</strong><small>Bank or players</small></span></button>

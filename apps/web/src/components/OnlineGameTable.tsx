@@ -42,6 +42,8 @@ export function OnlineGameTable({ room, client, connection, events, error }: { r
   const [counterOffer, setCounterOffer] = useState<DomesticTradeOfferView | null>(null);
   const [pendingCommand, setPendingCommand] = useState<GameCommand | null>(null);
   const [endGameConfirmOpen, setEndGameConfirmOpen] = useState(false);
+  const [gameOverOpen, setGameOverOpen] = useState(() => room.game?.phase.kind === "game-over");
+  const [closedTableOpen, setClosedTableOpen] = useState(() => Boolean(room.endedReason));
   const [toast, setToast] = useState<string | null>(null);
   const [rollEffect, setRollEffect] = useState<{ readonly dice: readonly [number, number]; readonly total: number } | null>(null);
   const [productionEffect, setProductionEffect] = useState<Readonly<Record<PlayerId, ResourceBundle>> | null>(null);
@@ -60,6 +62,8 @@ export function OnlineGameTable({ room, client, connection, events, error }: { r
   const colors = useMemo(() => new Map(room.members.map((member) => [member.id, COLOR_VALUES[member.color]])), [room.members]);
 
   useEffect(() => { setAction("inspect"); setSelection(null); setPendingCommand(null); }, [state.phase.kind, activeActorId]);
+  useEffect(() => { if (state.phase.kind === "game-over") setGameOverOpen(true); }, [state.phase.kind]);
+  useEffect(() => { if (room.endedReason) setClosedTableOpen(true); }, [room.endedReason]);
   useEffect(() => {
     if (!error) return;
     setToast(error);
@@ -119,8 +123,8 @@ export function OnlineGameTable({ room, client, connection, events, error }: { r
     else if (targets.action === "city") next = { type: "BUILD_CITY", vertexId: id as VertexId };
     if (next) command(next);
   }
-  function offerTrade(partnerId: PlayerId, actorGives: ResourceBundle, partnerGives: ResourceBundle) {
-    client.offerTrade(state.version, partnerId, actorGives, partnerGives);
+  function offerTrade(actorGives: ResourceBundle, partnerGives: ResourceBundle) {
+    client.offerTrade(state.version, actorGives, partnerGives);
     setTradeOpen(false);
   }
   function counterTrade(offerId: string, actorGives: ResourceBundle, partnerGives: ResourceBundle) {
@@ -136,20 +140,20 @@ export function OnlineGameTable({ room, client, connection, events, error }: { r
 
   return <div className="app-shell">
     <header className="topbar"><a className="brand" href="#game"><span className="brand-mark"><i /><i /><i /></span><span>KAATAAN</span></a><div className="room-info"><span className="eyebrow">Private table</span><strong>Island {room.code} <i>•</i> {connection === "connected" ? "Live" : "Reconnecting"}</strong></div><div className="topbar-actions"><button type="button" className="invite-button" onClick={() => void copyInvite()}><Icon name="plus" />Invite friends</button><div className="profile-chip"><div style={{ background: colors.get(viewerId) }}>{viewer.name.slice(0, 1).toUpperCase()}</div><span><small>Your seat</small><strong>{viewer.name}</strong></span></div></div></header>
-    <main id="game" className="game-layout"><PlayerRail state={state} actorId={activeActorId} colorsByPlayer={colors} members={room.members} /><div className="game-center"><div className="game-statusbar"><div><span className="eyebrow">{state.phase.kind === "setup" ? "Opening placement" : `Paired turn ${state.pairedTurn}`}</span><h1>{room.endedReason ? "Game ended" : viewerCanAct ? phaseLabel(state) : waitingName ? `${waitingName} is playing` : phaseLabel(state)}</h1></div><div className="status-actions"><TurnTimer deadline={room.turnDeadlineAt} />{room.members.find((member) => member.id === viewerId)?.isHost && room.members.filter((member) => !member.isConnected).length > 2 && room.status === "playing" && <button type="button" className="danger-text-button" onClick={() => setEndGameConfirmOpen(true)}>End inactive game</button>}<span className={`connection-pill compact is-${connection}`}><i />{connection === "connected" ? "Live" : "Reconnecting"}</span><button type="button" className="text-button" onClick={() => client.leave()}>Leave table</button></div></div>
+    <main id="game" className="game-layout"><PlayerRail state={state} actorId={activeActorId} viewerId={viewerId} colorsByPlayer={colors} members={room.members} /><div className="game-center"><div className="game-statusbar"><div><span className="eyebrow">{state.phase.kind === "setup" ? "Opening placement" : `Paired turn ${state.pairedTurn}`}</span><h1>{room.endedReason ? "Game ended" : viewerCanAct ? phaseLabel(state) : waitingName ? `${waitingName} is playing` : phaseLabel(state)}</h1></div><div className="status-actions"><TurnTimer deadline={room.turnDeadlineAt} />{room.members.find((member) => member.id === viewerId)?.isHost && room.members.filter((member) => !member.isConnected).length > 2 && room.status === "playing" && <button type="button" className="danger-text-button" onClick={() => setEndGameConfirmOpen(true)}>End inactive game</button>}<span className={`connection-pill compact is-${connection}`}><i />{connection === "connected" ? "Live" : "Reconnecting"}</span><button type="button" className="text-button" onClick={() => client.leave()}>Leave table</button></div></div>
       <SvgBoard state={state} targets={targets} selectedId={selection?.id ?? null} onTarget={selectBoardTarget} onInspect={setSelection} colorsByPlayer={colors} rollResult={rollEffect} productionPayouts={productionEffect} />
       {viewerCanAct && <PhasePrompt state={state} actorId={viewerId} onCommand={command} />}
       <ResourceHand state={state} playerId={viewerId} />
       {viewer.developmentCards.length > 0 && <section className="development-hand"><span>Development cards</span><div>{viewer.developmentCards.map((card) => <button type="button" key={card.id} disabled={!viewerCanAct || (card.type === "victory-point" ? victoryCards.length < victoryCardsNeeded : viewer.developmentCardPlayedThisTurn || card.purchasedPlayerTurn >= viewer.playerTurnSequence)} onClick={() => card.type === "victory-point" ? command({ type: "REVEAL_VICTORY_POINTS", cardIds: victoryCards.slice(0, victoryCardsNeeded).map((item) => item.id) }) : command({ type: "PLAY_DEVELOPMENT_CARD", cardId: card.id })}><Icon name={card.type === "knight" ? "helmet" : card.type === "road-building" ? "road" : "spark"} />{card.type === "victory-point" && victoryCards.length >= victoryCardsNeeded ? "Reveal to win" : card.type.replaceAll("-", " ")}</button>)}</div></section>}
       <ActionDock state={state} actorId={viewerId} disabled={!viewerCanAct} selectedAction={action} onAction={setAction} onRoll={() => command({ type: "ROLL_DICE" })} onEndTurn={() => command({ type: "END_SUBTURN" })} onTrade={() => setTradeOpen(true)} onBuyDevelopment={() => command({ type: "BUY_DEVELOPMENT_CARD" })} />
-    </div><SidePanel state={state} events={activity} selection={selection} actorId={activeActorId} /></main>
+    </div><SidePanel state={state} events={activity} selection={selection} diceStatistics={room.diceStatistics} /></main>
     {tradeOpen && <TradeDialog state={state} actorId={viewerId} onClose={() => setTradeOpen(false)} onTrade={command} onDomesticOffer={offerTrade} />}
     {counterOffer && <TradeDialog state={state} actorId={viewerId} counterOffer={counterOffer} onClose={() => setCounterOffer(null)} onTrade={command} onCounter={counterTrade} />}
     <TradeOfferBanner room={room} client={client} onCounter={setCounterOffer} />
     {pendingCommand && <ConfirmActionDialog command={pendingCommand} state={state} onCancel={() => setPendingCommand(null)} onConfirm={() => { const confirmed = pendingCommand; setPendingCommand(null); sendCommand(confirmed); }} />}
     {endGameConfirmOpen && <div className="modal-backdrop" role="presentation" onMouseDown={() => setEndGameConfirmOpen(false)}><section className="dialog confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="end-inactive-title" onMouseDown={(event) => event.stopPropagation()}><div className="confirmation-mark"><Icon name="hand" /></div><span className="eyebrow">Host control</span><h2 id="end-inactive-title">End this inactive game?</h2><p>More than two players are offline. This closes the table for everyone and cannot be undone.</p><div className="confirmation-actions"><button type="button" onClick={() => setEndGameConfirmOpen(false)}>Keep playing</button><button type="button" className="confirm-button danger-confirm" onClick={() => { setEndGameConfirmOpen(false); client.endGame(); }}>End game <Icon name="chevron" /></button></div></section></div>}
-    <GameOverDialog state={state} onNewGame={() => client.leave()} />
-    {room.endedReason && <div className="modal-backdrop"><section className="dialog confirmation-dialog" role="dialog" aria-modal="true"><div className="confirmation-mark"><Icon name="hand" /></div><span className="eyebrow">Table closed</span><h2>Game ended by the host</h2><p>More than two players were offline, so the host closed this inactive game.</p><div className="confirmation-actions"><button type="button" className="confirm-button" onClick={() => client.leave()}>Leave table <Icon name="chevron" /></button></div></section></div>}
+    {gameOverOpen && <GameOverDialog state={state} onReturnToBoard={() => setGameOverOpen(false)} onHome={() => client.leave()} />}
+    {room.endedReason && closedTableOpen && <div className="modal-backdrop"><section className="dialog confirmation-dialog" role="dialog" aria-modal="true"><div className="confirmation-mark"><Icon name="hand" /></div><span className="eyebrow">Table closed</span><h2>Game ended by the host</h2><p>More than two players were offline, so the host closed this inactive game.</p><div className="confirmation-actions"><button type="button" onClick={() => setClosedTableOpen(false)}>Return to board</button><button type="button" className="confirm-button" onClick={() => client.leave()}>Home <Icon name="home" /></button></div></section></div>}
     {toast && <div className="toast" role="status"><Icon name="spark" /><span>{toast}</span></div>}
   </div>;
 }

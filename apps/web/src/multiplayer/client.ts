@@ -107,8 +107,8 @@ export class MultiplayerClient {
     this.send({ type: "game.command", commandId: this.id("command"), expectedVersion, command: wireCommand });
   }
 
-  offerTrade(expectedVersion: number, partnerId: string, actorGives: ResourceBundle, partnerGives: ResourceBundle): void {
-    this.send({ type: "trade.offer", requestId: this.id("offer"), expectedVersion, partnerId, actorGives, partnerGives });
+  offerTrade(expectedVersion: number, actorGives: ResourceBundle, partnerGives: ResourceBundle): void {
+    this.send({ type: "trade.offer", requestId: this.id("offer"), expectedVersion, actorGives, partnerGives });
   }
 
   counterTrade(expectedVersion: number, offerId: string, actorGives: ResourceBundle, partnerGives: ResourceBundle): void {
@@ -117,6 +117,10 @@ export class MultiplayerClient {
 
   respondToTrade(action: "accept" | "reject" | "cancel", offerId: string): void {
     this.send({ type: `trade.${action}`, requestId: this.id(`trade-${action}`), offerId } as ClientMessage);
+  }
+
+  selectTradeResponse(offerId: string, playerId: string): void {
+    this.send({ type: "trade.select", requestId: this.id("trade-select"), offerId, playerId });
   }
 
   leave(): void {

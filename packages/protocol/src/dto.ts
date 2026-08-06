@@ -41,18 +41,35 @@ export interface RoomSnapshot {
   readonly turnDeadlineAt: number | null;
   readonly activity: readonly ProjectedGameEvent[];
   readonly endedReason: "host-ended-offline" | null;
+  readonly diceStatistics: DiceStatisticsView;
   readonly game: GameSnapshot | null;
+}
+
+export interface DiceStatisticsView {
+  readonly totalRolls: number;
+  readonly outcomes: readonly {
+    readonly total: number;
+    readonly count: number;
+    readonly percentage: number;
+  }[];
 }
 
 export interface DomesticTradeOfferView {
   readonly id: string;
   readonly actorId: string;
-  readonly partnerId: string;
-  readonly proposedById: string;
   readonly actorGives: ResourceBundle;
   readonly partnerGives: ResourceBundle;
+  readonly responses: readonly DomesticTradeResponseView[];
   readonly gameVersion: number;
   readonly createdAt: number;
+}
+
+export interface DomesticTradeResponseView {
+  readonly playerId: string;
+  readonly status: "accepted" | "declined" | "countered";
+  readonly actorGives?: ResourceBundle;
+  readonly partnerGives?: ResourceBundle;
+  readonly updatedAt: number;
 }
 
 export interface PlayerSessionCredentials {
@@ -92,6 +109,7 @@ export interface PlayerGameView {
   readonly resourceCardCount: number;
   readonly developmentCardCount: number;
   readonly publicScore: number;
+  readonly victoryPointCardCount?: number | null;
   readonly playedKnights: number;
   readonly playedDevelopmentCardCount?: number;
   readonly playerTurnSequence: number;

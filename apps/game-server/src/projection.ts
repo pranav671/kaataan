@@ -69,6 +69,7 @@ export function projectGameForViewer(state: GameState, viewerId: PlayerId): Game
       const player = state.players.get(playerId);
       if (!player) throw new Error(`Missing player ${playerId}`);
       const ownView = playerId === viewerId;
+      const score = playerScore(state, playerId);
       return {
         id: player.id,
         name: player.name,
@@ -76,7 +77,10 @@ export function projectGameForViewer(state: GameState, viewerId: PlayerId): Game
         pieces: player.pieces,
         resourceCardCount: totalResources(player.hand),
         developmentCardCount: player.developmentCards.length,
-        publicScore: playerScore(state, playerId).publicScore,
+        publicScore: score.publicScore,
+        victoryPointCardCount: ownView || state.phase.kind === "game-over"
+          ? score.revealedVictoryPoints + score.hiddenVictoryPoints
+          : null,
         playedKnights: player.playedKnights,
         playedDevelopmentCardCount: state.resolvedDevelopmentCards.filter((card) => card.playerId === playerId).length,
         playerTurnSequence: player.playerTurnSequence,

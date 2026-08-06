@@ -7,11 +7,12 @@ import type { RoomMemberView } from "@kaataan/protocol";
 interface PlayerRailProps {
   readonly state: GameState;
   readonly actorId: PlayerId | null;
+  readonly viewerId: PlayerId;
   readonly colorsByPlayer?: ReadonlyMap<PlayerId, string>;
   readonly members: readonly RoomMemberView[];
 }
 
-export function PlayerRail({ state, actorId, colorsByPlayer, members }: PlayerRailProps) {
+export function PlayerRail({ state, actorId, viewerId, colorsByPlayer, members }: PlayerRailProps) {
   const memberById = new Map(members.map((member) => [member.id, member]));
   const onlineCount = members.filter((member) => member.isConnected).length;
   return (
@@ -31,7 +32,7 @@ export function PlayerRail({ state, actorId, colorsByPlayer, members }: PlayerRa
                 <div className="player-name-line"><strong>{player.name}</strong>{member?.isHost && <span className="host-pill">Host</span>}{role && <span className={`role-pill role-${role.at(-1)}`}>P{role.at(-1)}</span>}{member?.isConnected === false && <span className="offline-pill">Offline</span>}</div>
                 <div className="player-meta"><span title="Resource cards"><Icon name="cards" />{totalResources(player.hand)}</span><span title="Development cards played"><Icon name="spark" />{playedDevelopmentCards} played</span><span title="Roads built"><Icon name="road" />{15 - player.pieces.roads}</span><span title="Buildings"><Icon name="home" />{5 - player.pieces.settlements + 4 - player.pieces.cities}</span></div>
               </div>
-              <div className="score-orb" aria-label={`${displayedScore(state, playerId)} victory points`}>{displayedScore(state, playerId)}<small>VP</small></div>
+              <div className="score-orb" aria-label={`${displayedScore(state, playerId, viewerId)} victory points`}>{displayedScore(state, playerId, viewerId)}<small>VP</small></div>
               {(state.longestRoadHolderId === playerId || state.largestArmyHolderId === playerId) && <div className="player-awards" aria-label="Awards">{state.longestRoadHolderId === playerId && <Icon name="road" />}{state.largestArmyHolderId === playerId && <Icon name="helmet" />}</div>}
             </article>
           );

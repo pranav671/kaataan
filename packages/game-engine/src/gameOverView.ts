@@ -42,12 +42,12 @@ export function createGameOverView(state: GameState): GameOverView {
       name: player.name,
       seat: player.seat,
       publicScore: score.publicScore,
-      finalScore: score.publicScore,
+      finalScore: score.authoritativeScore,
       settlements,
       cities,
       playedKnights: player.playedKnights,
       longestRoadLength: longestRoadLength(state.layout.topology, state.occupancy, playerId),
-      victoryPointCards: score.revealedVictoryPoints,
+      victoryPointCards: score.revealedVictoryPoints + score.hiddenVictoryPoints,
     };
   });
   const sorted = [...rows].sort((left, right) => {
